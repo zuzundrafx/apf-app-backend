@@ -1,4 +1,4 @@
-// server.js (полный, с защитой от NaN и рабочим PvP)
+// server.js – ПОЛНЫЙ ФАЙЛ со всеми исправлениями
 require('dotenv').config();
 const express = require('express');
 const { createClient } = require('@supabase/supabase-js');
@@ -305,23 +305,33 @@ app.post('/api/notifications/:id/claim-refund', authenticate, async (req, res) =
   }
 });
 
-// ---------- ЛИДЕРБОРД ----------
+// ---------- ЛИДЕРБОРД (исправлен) ----------
 app.get('/api/leaderboard/:tournamentId', async (req, res) => {
   try {
     const tournamentId = parseInt(req.params.tournamentId);
-    const { data, error } = await supabase
+    const { data: bets, error: betsError } = await supabase
       .from('bets')
-      .select('user_id, username:users(username), total_damage, created_at')
-      .eq('tournament_id', tournamentId).eq('cancelled', false)
-      .order('total_damage', { ascending: false }).limit(100);
-    if (error) throw error;
+      .select('user_id, total_damage, created_at')
+      .eq('tournament_id', tournamentId)
+      .eq('cancelled', false)
+      .order('total_damage', { ascending: false })
+      .limit(100);
+    if (betsError) throw betsError;
 
-    const leaderboard = data.map((entry, index) => ({
+    const userIds = bets.map(b => b.user_id);
+    const { data: users } = await supabase
+      .from('users')
+      .select('id, username')
+      .in('id', userIds);
+
+    const userMap = new Map(users.map(u => [u.id, u.username]));
+
+    const leaderboard = bets.map((bet, index) => ({
       rank: index + 1,
-      userId: entry.user_id,
-      username: entry.username,
-      totalDamage: entry.total_damage,
-      timestamp: entry.created_at
+      userId: bet.user_id,
+      username: userMap.get(bet.user_id) || 'Unknown',
+      totalDamage: bet.total_damage,
+      timestamp: bet.created_at
     }));
     res.json(leaderboard);
   } catch (err) {
@@ -330,13 +340,12 @@ app.get('/api/leaderboard/:tournamentId', async (req, res) => {
   }
 });
 
-// ---------- СИНХРОНИЗАЦИЯ ОТ ПАРСЕРА (с защитой от NaN) ----------
+// ---------- СИНХРОНИЗАЦИЯ ОТ ПАРСЕРА ----------
 app.post('/api/tournaments/sync', async (req, res) => {
   try {
     const { tournament, fighters, is_completed } = req.body;
     console.log(`📥 Sync request for "${tournament.name}", fighters: ${fighters?.length || 0}, completed: ${is_completed}`);
 
-    // 1. Найти или создать турнир
     let { data: dbTournament, error: findError } = await supabase
       .from('tournaments').select('*').eq('name', tournament.name).single();
     if (findError && findError.code !== 'PGRST116') throw findError;
@@ -357,7 +366,6 @@ app.post('/api/tournaments/sync', async (req, res) => {
       console.log(`♻️ Existing tournament id=${dbTournament.id}, status=${dbTournament.status}`);
     }
 
-    // 2. Вставка бойцов с защитой от NaN
     let insertedCount = 0;
     for (const f of fighters) {
       const fighterData = {
@@ -385,7 +393,6 @@ app.post('/api/tournaments/sync', async (req, res) => {
     }
     console.log(`✅ Inserted/updated ${insertedCount} fighters`);
 
-    // 3. Если турнир завершён, обработать ставки
     if (is_completed) {
       console.log('🏁 Tournament completed, processing bets...');
       const { data: bets } = await supabase
@@ -464,13 +471,14 @@ app.post('/api/tournaments/sync', async (req, res) => {
   }
 });
 
-// ---------- PVP ----------
+// ---------- PVP (с логированием) ----------
 app.post('/api/pvp/start', authenticate, async (req, res) => {
   try {
     const { tournamentId, betAmount } = req.body;
     const userId = req.user.userId;
 
-    // Проверить, что у пользователя есть ставка на этот турнир
+    console.log(`🎮 PvP start: userId=${userId}, tournamentId=${tournamentId}, betAmount=${betAmount}`);
+
     const { data: userBet, error: betError } = await supabase
       .from('bets')
       .select('total_damage, selections')
@@ -478,41 +486,52 @@ app.post('/api/pvp/start', authenticate, async (req, res) => {
       .eq('tournament_id', tournamentId)
       .eq('cancelled', false)
       .single();
-    if (betError) throw new Error('No valid bet found for this tournament');
+    if (betError) {
+      console.error('❌ User bet error:', betError);
+      return res.status(400).json({ error: 'No valid bet found for this tournament' });
+    }
+    console.log(`✅ User bet found, total_damage=${userBet.total_damage}`);
 
-    // Проверить баланс
     const { data: user, error: userError } = await supabase
       .from('users')
       .select('coins, tickets')
       .eq('id', userId)
       .single();
-    if (userError) throw userError;
+    if (userError) {
+      console.error('❌ User fetch error:', userError);
+      throw userError;
+    }
     if (user.coins < betAmount || user.tickets < 1) {
       return res.status(400).json({ error: 'Not enough coins or tickets' });
     }
 
-    // Списать валюту
     await supabase.from('users')
       .update({ coins: user.coins - betAmount, tickets: user.tickets - 1 })
       .eq('id', userId);
+    console.log(`💰 Spent ${betAmount} coins and 1 ticket.`);
 
-    // Найти соперника с близким total_damage
+    console.log(`🔍 Looking for rivals in tournament ${tournamentId}, excluding user ${userId}`);
     const { data: rivals, error: rivalError } = await supabase
       .from('bets')
       .select('user_id, total_damage, selections')
       .eq('tournament_id', tournamentId)
       .eq('cancelled', false)
       .neq('user_id', userId);
-    if (rivalError) throw rivalError;
-    if (rivals.length === 0) {
-      // Вернуть валюту
+
+    if (rivalError) {
+      console.error('❌ Rivals query error:', rivalError);
+      throw rivalError;
+    }
+
+    console.log(`👥 Rivals found: ${rivals?.length || 0}`);
+    if (!rivals || rivals.length === 0) {
       await supabase.from('users')
         .update({ coins: user.coins, tickets: user.tickets })
         .eq('id', userId);
+      console.log('↩️ No rivals, refunded');
       return res.status(400).json({ error: 'No opponents available' });
     }
 
-    // Выбрать соперника с минимальной разницей в total_damage
     const userDamage = userBet.total_damage;
     let bestRival = rivals[0];
     let minDiff = Math.abs(userDamage - bestRival.total_damage);
@@ -523,18 +542,16 @@ app.post('/api/pvp/start', authenticate, async (req, res) => {
         bestRival = r;
       }
     }
+    console.log(`🤝 Selected rival: ${bestRival.user_id}, total_damage=${bestRival.total_damage}`);
 
-    // Получить профиль соперника
     const { data: rivalProfile } = await supabase
       .from('users')
       .select('username, photo_url')
       .eq('id', bestRival.user_id)
       .single();
 
-    // Симуляция боя
     const userCards = userBet.selections;
     const rivalCards = bestRival.selections;
-
     const userTotal = userCards.reduce((sum, c) => sum + (c.fighter['Total Damage'] || 0), 0);
     const rivalTotal = rivalCards.reduce((sum, c) => sum + (c.fighter['Total Damage'] || 0), 0);
 
@@ -542,27 +559,19 @@ app.post('/api/pvp/start', authenticate, async (req, res) => {
     if (userTotal > rivalTotal) {
       result = 'win';
       winnerId = userId;
-      if (userTotal - rivalTotal >= 100) resultType = 'decision-unanimous';
-      else resultType = 'decision-split';
+      resultType = (userTotal - rivalTotal >= 100) ? 'decision-unanimous' : 'decision-split';
     } else if (rivalTotal > userTotal) {
       result = 'loss';
       winnerId = bestRival.user_id;
-      if (rivalTotal - userTotal >= 100) resultType = 'decision-unanimous';
-      else resultType = 'decision-split';
+      resultType = (rivalTotal - userTotal >= 100) ? 'decision-unanimous' : 'decision-split';
     } else {
       result = 'draw';
     }
 
-    // Рассчитать награды
     let coinsReward = 0, expReward = 0;
     if (result === 'win') {
-      if (resultType === 'decision-unanimous') {
-        coinsReward = Math.ceil(betAmount * 1.5);
-        expReward = 7;
-      } else {
-        coinsReward = Math.ceil(betAmount * 1.2);
-        expReward = 5;
-      }
+      coinsReward = resultType === 'decision-unanimous' ? Math.ceil(betAmount * 1.5) : Math.ceil(betAmount * 1.2);
+      expReward = resultType === 'decision-unanimous' ? 7 : 5;
     } else if (result === 'loss') {
       expReward = resultType === 'decision-unanimous' ? 2 : 3;
     } else if (result === 'draw') {
@@ -570,15 +579,14 @@ app.post('/api/pvp/start', authenticate, async (req, res) => {
       expReward = 4;
     }
 
-    // Начислить награды победителю
     if (winnerId) {
       const { data: winner } = await supabase.from('users').select('coins, experience').eq('id', winnerId).single();
-      let newCoins = winner.coins + coinsReward;
-      let newExp = winner.experience + expReward;
-      await supabase.from('users').update({ coins: newCoins, experience: newExp }).eq('id', winnerId);
+      await supabase.from('users')
+        .update({ coins: winner.coins + coinsReward, experience: winner.experience + expReward })
+        .eq('id', winnerId);
+      console.log(`🏆 Winner ${winnerId} gets ${coinsReward} coins, ${expReward} exp`);
     }
 
-    // Записать бой
     await supabase.from('pvp_battles').insert({
       user_id: userId,
       rival_id: bestRival.user_id,
@@ -604,13 +612,13 @@ app.post('/api/pvp/start', authenticate, async (req, res) => {
       battleScript,
       rewards: { coins: coinsReward, experience: expReward },
       rival: {
-        username: rivalProfile.username,
-        photoUrl: rivalProfile.photo_url,
+        username: rivalProfile?.username || 'Opponent',
+        photoUrl: rivalProfile?.photo_url,
         selections: rivalCards
       }
     });
   } catch (err) {
-    console.error(err);
+    console.error('❌ PvP error:', err);
     res.status(500).json({ error: err.message });
   }
 });
