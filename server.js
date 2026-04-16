@@ -14,7 +14,15 @@ const pool = new Pool({
 
 const JWT_SECRET = process.env.JWT_SECRET || 'your_secret_key';
 
-app.use(cors());
+const corsOptions = {
+    origin: ['https://apf-app.vercel.app', 'http://localhost:5173'],
+    credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization']
+  };
+  app.use(cors(corsOptions));
+  // Обработка preflight
+  app.options('*', cors(corsOptions));
 app.use(express.json());
 
 // --- Авторизация ---
