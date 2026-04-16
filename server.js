@@ -95,7 +95,7 @@ app.get('/api/tournaments/:id/fighters', async (req, res) => {
   }
 });
 
-// Создание ставки
+// Создание ставки (исправлено: убран .single(), добавлена проверка)
 app.post('/api/bets', async (req, res) => {
   try {
     const { userId, tournamentId, betAmount, selections } = req.body;
@@ -117,11 +117,12 @@ app.post('/api/bets', async (req, res) => {
     const { data: bet, error: betError } = await supabase
       .from('bets')
       .insert([{ user_id: userId, tournament_id: tournamentId, bet_amount: betAmount, total_damage: totalDamage, selections: selections }])
-      .select()
-      .single();
-    if (betError) throw betError;
+      .select();
 
-    res.json({ success: true, bet });
+    if (betError) throw betError;
+    if (!bet || bet.length === 0) throw new Error('Failed to insert bet');
+
+    res.json({ success: true, bet: bet[0] });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message });
