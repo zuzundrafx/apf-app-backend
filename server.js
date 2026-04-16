@@ -1,124 +1,101 @@
 require('dotenv').config();
 const express = require('express');
-const { Pool } = require('pg');
+const { createClient } = require('@supabase/supabase-js');
 const cors = require('cors');
 const jwt = require('jsonwebtoken');
 
 const app = express();
 const port = process.env.PORT || 3001;
 
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false }
-});
+// Supabase клиент
+const supabaseUrl = process.env.SUPABASE_URL;
+const supabaseKey = process.env.SUPABASE_ANON_KEY;
+const supabase = createClient(supabaseUrl, supabaseKey);
 
 const JWT_SECRET = process.env.JWT_SECRET || 'your_secret_key';
 
-const corsOptions = {
-    origin: ['https://apf-app.vercel.app', 'http://localhost:5173'],
-    credentials: true,
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization']
-  };
-  app.use(cors(corsOptions));
-  // Не нужно отдельно вызывать app.options('*', ...)
+app.use(cors({ origin: ['https://apf-app.vercel.app', 'http://localhost:5173'] }));
 app.use(express.json());
 
-// --- Авторизация ---
+// Авторизация
 app.post('/api/auth/telegram', async (req, res) => {
   try {
     const { user } = req.body;
-    if (!user || !user.id) {
-      return res.status(400).json({ error: 'User data missing' });
-    }
+    if (!user || !user.id) return res.status(400).json({ error: 'User data missing' });
     const userId = `user_${user.id}`;
     const username = user.username || `${user.first_name} ${user.last_name || ''}`.trim();
     const photoUrl = user.photo_url;
 
-    let existingUser = await pool.query('SELECT * FROM users WHERE id = $1', [userId]);
-    if (existingUser.rows.length === 0) {
-      await pool.query(
-        `INSERT INTO users (id, username, photo_url, level, experience, exp_points, coins, tickets, ton)
-         VALUES ($1, $2, $3, 1, 0, 1, 100, 0, 0)`,
-        [userId, username, photoUrl]
-      );
+    let { data: existingUser, error: selectError } = await supabase
+      .from('users')
+      .select('*')
+      .eq('id', userId)
+      .single();
+    if (selectError && selectError.code !== 'PGRST116') throw selectError;
+
+    if (!existingUser) {
+      const { data: newUser, error: insertError } = await supabase
+        .from('users')
+        .insert([{ id: userId, username, photo_url: photoUrl, level: 1, experience: 0, exp_points: 1, coins: 100, tickets: 0, ton: 0 }])
+        .select()
+        .single();
+      if (insertError) throw insertError;
+      existingUser = newUser;
     } else {
-      await pool.query(
-        'UPDATE users SET username = $1, photo_url = $2, updated_at = NOW() WHERE id = $3',
-        [username, photoUrl, userId]
-      );
+      await supabase.from('users').update({ username, photo_url: photoUrl, updated_at: new Date() }).eq('id', userId);
     }
 
-    const userData = (await pool.query('SELECT * FROM users WHERE id = $1', [userId])).rows[0];
-    const token = jwt.sign({ userId: userData.id, username: userData.username }, JWT_SECRET, { expiresIn: '7d' });
-
-    res.json({
-      token,
-      user: {
-        id: userData.id,
-        username: userData.username,
-        photoUrl: userData.photo_url,
-        level: userData.level,
-        experience: userData.experience,
-        expPoints: userData.exp_points,
-        coins: userData.coins,
-        tickets: userData.tickets,
-        ton: userData.ton
-      }
-    });
+    const token = jwt.sign({ userId: existingUser.id, username: existingUser.username }, JWT_SECRET, { expiresIn: '7d' });
+    res.json({ token, user: existingUser });
   } catch (err) {
     console.error(err);
-    res.status(500).json({ error: 'Internal server error' });
+    res.status(500).json({ error: err.message });
   }
 });
 
-// --- Профиль ---
+// Профиль
 app.get('/api/user/profile', async (req, res) => {
   try {
     const authHeader = req.headers.authorization;
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      return res.status(401).json({ error: 'Missing token' });
-    }
+    if (!authHeader || !authHeader.startsWith('Bearer ')) return res.status(401).json({ error: 'Missing token' });
     const token = authHeader.split(' ')[1];
     let decoded;
-    try {
-      decoded = jwt.verify(token, JWT_SECRET);
-    } catch {
-      return res.status(401).json({ error: 'Invalid token' });
-    }
-    const user = (await pool.query('SELECT * FROM users WHERE id = $1', [decoded.userId])).rows[0];
-    if (!user) return res.status(404).json({ error: 'User not found' });
+    try { decoded = jwt.verify(token, JWT_SECRET); } catch { return res.status(401).json({ error: 'Invalid token' }); }
+    const { data: user, error } = await supabase.from('users').select('*').eq('id', decoded.userId).single();
+    if (error) throw error;
     res.json(user);
   } catch (err) {
     console.error(err);
-    res.status(500).json({ error: 'Database error' });
+    res.status(500).json({ error: err.message });
   }
 });
 
-// --- Список турниров ---
+// Список турниров
 app.get('/api/tournaments', async (req, res) => {
   try {
-    const result = await pool.query('SELECT * FROM tournaments ORDER BY date DESC');
-    res.json(result.rows);
+    const { data, error } = await supabase.from('tournaments').select('*').order('date', { ascending: false });
+    if (error) throw error;
+    res.json(data);
   } catch (err) {
     console.error(err);
-    res.status(500).json({ error: 'Database error' });
+    res.status(500).json({ error: err.message });
   }
 });
 
-// --- Бойцы турнира ---
+// Бойцы турнира
 app.get('/api/tournaments/:id/fighters', async (req, res) => {
   try {
     const tournamentId = parseInt(req.params.id);
-    const result = await pool.query('SELECT * FROM fighters WHERE tournament_id = $1', [tournamentId]);
-    res.json(result.rows);
+    const { data, error } = await supabase.from('fighters').select('*').eq('tournament_id', tournamentId);
+    if (error) throw error;
+    res.json(data);
   } catch (err) {
     console.error(err);
-    res.status(500).json({ error: 'Database error' });
+    res.status(500).json({ error: err.message });
   }
 });
 
-// --- Создание ставки ---
+// Создание ставки
 app.post('/api/bets', async (req, res) => {
   try {
     const { userId, tournamentId, betAmount, selections } = req.body;
@@ -127,67 +104,66 @@ app.post('/api/bets', async (req, res) => {
     }
 
     // Проверка баланса
-    const userRes = await pool.query('SELECT coins FROM users WHERE id = $1', [userId]);
-    if (userRes.rows.length === 0) return res.status(404).json({ error: 'User not found' });
-    const userCoins = userRes.rows[0].coins;
-    if (userCoins < betAmount) {
-      return res.status(400).json({ error: 'Not enough coins' });
-    }
+    const { data: user, error: userError } = await supabase.from('users').select('coins').eq('id', userId).single();
+    if (userError) throw userError;
+    if (user.coins < betAmount) return res.status(400).json({ error: 'Not enough coins' });
 
     // Списание монет
-    await pool.query('UPDATE users SET coins = coins - $1, updated_at = NOW() WHERE id = $2', [betAmount, userId]);
-
-    // Подсчёт totalDamage
-    const totalDamage = selections.reduce((sum, sel) => sum + (sel.fighter.TotalDamage || 0), 0);
+    const { error: updateError } = await supabase.from('users').update({ coins: user.coins - betAmount }).eq('id', userId);
+    if (updateError) throw updateError;
 
     // Сохранение ставки
-    const result = await pool.query(
-      `INSERT INTO bets (user_id, tournament_id, bet_amount, total_damage, selections, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5, NOW(), NOW())
-       RETURNING *`,
-      [userId, tournamentId, betAmount, totalDamage, JSON.stringify(selections)]
-    );
+    const totalDamage = selections.reduce((sum, sel) => sum + (sel.fighter.TotalDamage || 0), 0);
+    const { data: bet, error: betError } = await supabase
+      .from('bets')
+      .insert([{ user_id: userId, tournament_id: tournamentId, bet_amount: betAmount, total_damage: totalDamage, selections: selections }])
+      .select()
+      .single();
+    if (betError) throw betError;
 
-    res.json({ success: true, bet: result.rows[0] });
+    res.json({ success: true, bet });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message });
   }
 });
 
-// --- Получение ставки пользователя на турнир ---
+// Получить ставку пользователя для турнира
 app.get('/api/bets/user/:userId/tournament/:tournamentId', async (req, res) => {
   try {
     const { userId, tournamentId } = req.params;
-    const result = await pool.query(
-      'SELECT * FROM bets WHERE user_id = $1 AND tournament_id = $2',
-      [userId, tournamentId]
-    );
-    if (result.rows.length === 0) {
-      return res.status(404).json({ error: 'Bet not found' });
-    }
-    res.json(result.rows[0]);
+    const { data, error } = await supabase
+      .from('bets')
+      .select('*')
+      .eq('user_id', userId)
+      .eq('tournament_id', tournamentId)
+      .single();
+    if (error && error.code !== 'PGRST116') throw error;
+    res.json(data || null);
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message });
   }
 });
 
-// --- Уведомления (заглушка) ---
-app.get('/api/notifications', async (req, res) => {
-  // Пока возвращаем пустой массив
-  res.json([]);
+// Получить все ставки пользователя
+app.get('/api/bets/user/:userId', async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const { data, error } = await supabase.from('bets').select('*').eq('user_id', userId);
+    if (error) throw error;
+    res.json(data);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
 });
 
-app.post('/api/notifications/claim-all', async (req, res) => {
-  res.json({ success: true });
-});
+// Уведомления (заглушки)
+app.get('/api/notifications', async (req, res) => res.json([]));
+app.post('/api/notifications/claim-all', async (req, res) => res.json({ success: true }));
 
-// --- PvP (заглушка) ---
-app.post('/api/pvp/start', async (req, res) => {
-  res.status(501).json({ error: 'Not implemented yet' });
-});
+// PvP (заглушка)
+app.post('/api/pvp/start', async (req, res) => res.status(501).json({ error: 'Not implemented' }));
 
-app.listen(port, () => {
-  console.log(`Server running on http://localhost:${port}`);
-});
+app.listen(port, () => console.log(`Server running on port ${port}`));
