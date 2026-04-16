@@ -1,4 +1,4 @@
-// server.js (обновлённый)
+// server.js (полный, с защитой от NaN и рабочим PvP)
 require('dotenv').config();
 const express = require('express');
 const { createClient } = require('@supabase/supabase-js');
@@ -8,11 +8,9 @@ const jwt = require('jsonwebtoken');
 const app = express();
 const port = process.env.PORT || 3001;
 
-// Supabase клиент
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseKey = process.env.SUPABASE_ANON_KEY;
 const supabase = createClient(supabaseUrl, supabaseKey);
-
 const JWT_SECRET = process.env.JWT_SECRET || 'your_secret_key';
 
 app.use(cors({
@@ -21,7 +19,7 @@ app.use(cors({
 }));
 app.use(express.json());
 
-// Middleware для проверки JWT
+// Middleware
 function authenticate(req, res, next) {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
@@ -30,12 +28,19 @@ function authenticate(req, res, next) {
   const token = authHeader.split(' ')[1];
   try {
     const decoded = jwt.verify(token, JWT_SECRET);
-    req.user = decoded; // { userId, username }
+    req.user = decoded;
     next();
   } catch (err) {
     return res.status(401).json({ error: 'Invalid token' });
   }
 }
+
+// Вспомогательная функция
+const safeNumber = (val) => {
+  if (val === null || val === undefined || val === '') return 0;
+  const num = Number(val);
+  return isNaN(num) ? 0 : num;
+};
 
 // ---------- АВТОРИЗАЦИЯ ----------
 app.post('/api/auth/telegram', async (req, res) => {
@@ -57,18 +62,10 @@ app.post('/api/auth/telegram', async (req, res) => {
       const { data: newUser, error: insertError } = await supabase
         .from('users')
         .insert([{
-          id: userId,
-          username,
-          photo_url: photoUrl,
-          level: 1,
-          experience: 0,
-          exp_points: 1,
-          coins: 100,
-          tickets: 0,
-          ton: 0
+          id: userId, username, photo_url: photoUrl, level: 1,
+          experience: 0, exp_points: 1, coins: 100, tickets: 0, ton: 0
         }])
-        .select()
-        .single();
+        .select().single();
       if (insertError) throw insertError;
       existingUser = newUser;
     } else {
@@ -79,10 +76,8 @@ app.post('/api/auth/telegram', async (req, res) => {
 
     const token = jwt.sign(
       { userId: existingUser.id, username: existingUser.username },
-      JWT_SECRET,
-      { expiresIn: '7d' }
+      JWT_SECRET, { expiresIn: '7d' }
     );
-
     res.json({ token, user: existingUser });
   } catch (err) {
     console.error(err);
@@ -94,10 +89,7 @@ app.post('/api/auth/telegram', async (req, res) => {
 app.get('/api/user/profile', authenticate, async (req, res) => {
   try {
     const { data: user, error } = await supabase
-      .from('users')
-      .select('*')
-      .eq('id', req.user.userId)
-      .single();
+      .from('users').select('*').eq('id', req.user.userId).single();
     if (error) throw error;
     res.json(user);
   } catch (err) {
@@ -110,9 +102,7 @@ app.get('/api/user/profile', authenticate, async (req, res) => {
 app.get('/api/tournaments', async (req, res) => {
   try {
     const { data, error } = await supabase
-      .from('tournaments')
-      .select('*')
-      .order('date', { ascending: false });
+      .from('tournaments').select('*').order('date', { ascending: false });
     if (error) throw error;
     res.json(data);
   } catch (err) {
@@ -125,10 +115,9 @@ app.get('/api/tournaments', async (req, res) => {
 app.get('/api/tournaments/:id/fighters', async (req, res) => {
   try {
     const tournamentId = parseInt(req.params.id);
+    if (isNaN(tournamentId)) return res.status(400).json({ error: 'Invalid tournament id' });
     const { data, error } = await supabase
-      .from('fighters')
-      .select('*')
-      .eq('tournament_id', tournamentId);
+      .from('fighters').select('*').eq('tournament_id', tournamentId);
     if (error) throw error;
     res.json(data);
   } catch (err) {
@@ -143,66 +132,40 @@ app.post('/api/bets', authenticate, async (req, res) => {
     const { tournamentId, betAmount, selections } = req.body;
     const userId = req.user.userId;
 
-    // Валидация
     if (!tournamentId || !betAmount || !selections || selections.length !== 5) {
       return res.status(400).json({ error: 'Invalid data: need 5 selections' });
     }
-
-    // Проверить, что все 5 весовых категорий различны
     const weightClasses = selections.map(s => s.weightClass);
     if (new Set(weightClasses).size !== 5) {
       return res.status(400).json({ error: 'All weight classes must be different' });
     }
 
-    // Проверить, что турнир имеет статус upcoming
     const { data: tournament, error: tournError } = await supabase
-      .from('tournaments')
-      .select('status')
-      .eq('id', tournamentId)
-      .single();
+      .from('tournaments').select('status').eq('id', tournamentId).single();
     if (tournError) throw tournError;
     if (tournament.status !== 'upcoming') {
       return res.status(400).json({ error: 'Tournament is not open for betting' });
     }
 
-    // Проверить баланс
     const { data: user, error: userError } = await supabase
-      .from('users')
-      .select('coins')
-      .eq('id', userId)
-      .single();
+      .from('users').select('coins').eq('id', userId).single();
     if (userError) throw userError;
     if (user.coins < betAmount) {
       return res.status(400).json({ error: 'Not enough coins' });
     }
 
-    // Списать монеты
-    const { error: updateError } = await supabase
-      .from('users')
-      .update({ coins: user.coins - betAmount })
-      .eq('id', userId);
-    if (updateError) throw updateError;
+    await supabase.from('users')
+      .update({ coins: user.coins - betAmount }).eq('id', userId);
 
-    // Рассчитать предварительный totalDamage (до результатов боёв) – сумма переданных TotalDamage
     const totalDamage = selections.reduce((sum, sel) => sum + (sel.fighter.TotalDamage || 0), 0);
 
-    // Сохранить ставку
     const { data: bet, error: betError } = await supabase
-      .from('bets')
-      .insert([{
-        user_id: userId,
-        tournament_id: tournamentId,
-        bet_amount: betAmount,
-        total_damage: totalDamage,
-        selections: selections,
-        cancelled: false,
-        reward_accepted: false
-      }])
-      .select();
+      .from('bets').insert([{
+        user_id: userId, tournament_id: tournamentId, bet_amount: betAmount,
+        total_damage: totalDamage, selections: selections, cancelled: false, reward_accepted: false
+      }]).select();
 
     if (betError) throw betError;
-    if (!bet || bet.length === 0) throw new Error('Failed to insert bet');
-
     res.json({ success: true, bet: bet[0] });
   } catch (err) {
     console.error(err);
@@ -210,14 +173,10 @@ app.post('/api/bets', authenticate, async (req, res) => {
   }
 });
 
-// Получить все ставки пользователя
 app.get('/api/bets/user/:userId', async (req, res) => {
   try {
-    const { userId } = req.params;
     const { data, error } = await supabase
-      .from('bets')
-      .select('*')
-      .eq('user_id', userId);
+      .from('bets').select('*').eq('user_id', req.params.userId);
     if (error) throw error;
     res.json(data);
   } catch (err) {
@@ -226,16 +185,12 @@ app.get('/api/bets/user/:userId', async (req, res) => {
   }
 });
 
-// Получить ставку пользователя на конкретный турнир
 app.get('/api/bets/user/:userId/tournament/:tournamentId', async (req, res) => {
   try {
     const { userId, tournamentId } = req.params;
     const { data, error } = await supabase
-      .from('bets')
-      .select('*')
-      .eq('user_id', userId)
-      .eq('tournament_id', tournamentId)
-      .single();
+      .from('bets').select('*')
+      .eq('user_id', userId).eq('tournament_id', tournamentId).single();
     if (error && error.code !== 'PGRST116') throw error;
     res.json(data || null);
   } catch (err) {
@@ -248,10 +203,8 @@ app.get('/api/bets/user/:userId/tournament/:tournamentId', async (req, res) => {
 app.get('/api/notifications', authenticate, async (req, res) => {
   try {
     const { data, error } = await supabase
-      .from('notifications')
-      .select('*')
-      .eq('user_id', req.user.userId)
-      .eq('claimed', false)
+      .from('notifications').select('*')
+      .eq('user_id', req.user.userId).eq('claimed', false)
       .order('created_at', { ascending: false });
     if (error) throw error;
     res.json(data);
@@ -264,18 +217,12 @@ app.get('/api/notifications', authenticate, async (req, res) => {
 app.post('/api/notifications/claim-all', authenticate, async (req, res) => {
   try {
     const userId = req.user.userId;
-    // Получить все непрочитанные уведомления
     const { data: notifications, error: notifError } = await supabase
-      .from('notifications')
-      .select('*')
-      .eq('user_id', userId)
-      .eq('claimed', false);
+      .from('notifications').select('*')
+      .eq('user_id', userId).eq('claimed', false);
     if (notifError) throw notifError;
 
-    let totalCoins = 0;
-    let totalTickets = 0;
-    let totalExp = 0;
-
+    let totalCoins = 0, totalTickets = 0, totalExp = 0;
     for (const n of notifications) {
       if (n.type === 'tournament_reward') {
         totalCoins += n.data.coins || 0;
@@ -287,22 +234,17 @@ app.post('/api/notifications/claim-all', authenticate, async (req, res) => {
     }
 
     if (totalCoins > 0 || totalTickets > 0 || totalExp > 0) {
-      // Получить текущие значения пользователя
       const { data: user, error: userError } = await supabase
-        .from('users')
-        .select('coins, tickets, experience, level, exp_points')
-        .eq('id', userId)
-        .single();
+        .from('users').select('coins, tickets, experience, level, exp_points')
+        .eq('id', userId).single();
       if (userError) throw userError;
 
       const newCoins = user.coins + totalCoins;
       const newTickets = user.tickets + totalTickets;
       const newExp = user.experience + totalExp;
 
-      // Рассчитать новый уровень (логика из фронта, упрощённо)
       const LEVEL_THRESHOLDS = [5, 10, 15, 20, 25, 30, 35, 40, 45];
       let level = user.level;
-      let expForNext = LEVEL_THRESHOLDS[level - 1] || 0;
       let remainingExp = newExp;
       for (let i = 0; i < LEVEL_THRESHOLDS.length; i++) {
         if (remainingExp >= LEVEL_THRESHOLDS[i]) {
@@ -313,30 +255,24 @@ app.post('/api/notifications/claim-all', authenticate, async (req, res) => {
       let newExpPoints = user.exp_points;
       if (level > user.level) newExpPoints += (level - user.level);
 
-      await supabase.from('users')
-        .update({
-          coins: newCoins,
-          tickets: newTickets,
-          experience: newExp,
-          level: level,
-          exp_points: newExpPoints
-        })
-        .eq('id', userId);
+      await supabase.from('users').update({
+        coins: newCoins, tickets: newTickets, experience: newExp,
+        level: level, exp_points: newExpPoints
+      }).eq('id', userId);
     }
 
-    // Пометить уведомления как прочитанные
     const ids = notifications.map(n => n.id);
     if (ids.length > 0) {
-      await supabase.from('notifications')
-        .update({ claimed: true })
-        .in('id', ids);
+      await supabase.from('notifications').update({ claimed: true }).in('id', ids);
     }
 
+    const { data: updatedUser } = await supabase
+      .from('users').select('coins, tickets, experience').eq('id', userId).single();
     res.json({
       success: true,
-      newCoins: (await supabase.from('users').select('coins').eq('id', userId).single()).data.coins,
-      newTickets: (await supabase.from('users').select('tickets').eq('id', userId).single()).data.tickets,
-      newExp: (await supabase.from('users').select('experience').eq('id', userId).single()).data.experience
+      newCoins: updatedUser.coins,
+      newTickets: updatedUser.tickets,
+      newExp: updatedUser.experience
     });
   } catch (err) {
     console.error(err);
@@ -350,11 +286,8 @@ app.post('/api/notifications/:id/claim-refund', authenticate, async (req, res) =
     const userId = req.user.userId;
 
     const { data: notification, error: notifError } = await supabase
-      .from('notifications')
-      .select('*')
-      .eq('id', notificationId)
-      .eq('user_id', userId)
-      .single();
+      .from('notifications').select('*')
+      .eq('id', notificationId).eq('user_id', userId).single();
     if (notifError) throw notifError;
     if (notification.type !== 'bet_cancelled') {
       return res.status(400).json({ error: 'Not a refund notification' });
@@ -364,11 +297,7 @@ app.post('/api/notifications/:id/claim-refund', authenticate, async (req, res) =
     if (refundAmount > 0) {
       await supabase.rpc('increment_coins', { user_id: userId, amount: refundAmount });
     }
-
-    await supabase.from('notifications')
-      .update({ claimed: true })
-      .eq('id', notificationId);
-
+    await supabase.from('notifications').update({ claimed: true }).eq('id', notificationId);
     res.json({ success: true });
   } catch (err) {
     console.error(err);
@@ -383,10 +312,8 @@ app.get('/api/leaderboard/:tournamentId', async (req, res) => {
     const { data, error } = await supabase
       .from('bets')
       .select('user_id, username:users(username), total_damage, created_at')
-      .eq('tournament_id', tournamentId)
-      .eq('cancelled', false)
-      .order('total_damage', { ascending: false })
-      .limit(100);
+      .eq('tournament_id', tournamentId).eq('cancelled', false)
+      .order('total_damage', { ascending: false }).limit(100);
     if (error) throw error;
 
     const leaderboard = data.map((entry, index) => ({
@@ -403,64 +330,67 @@ app.get('/api/leaderboard/:tournamentId', async (req, res) => {
   }
 });
 
-// ---------- СИНХРОНИЗАЦИЯ ОТ ПАРСЕРА ----------
+// ---------- СИНХРОНИЗАЦИЯ ОТ ПАРСЕРА (с защитой от NaN) ----------
 app.post('/api/tournaments/sync', async (req, res) => {
   try {
-    const { tournament, fighters } = req.body;
-    // tournament: { name, league, date }
-    // fighters: массив объектов Fighter со всеми полями
+    const { tournament, fighters, is_completed } = req.body;
+    console.log(`📥 Sync request for "${tournament.name}", fighters: ${fighters?.length || 0}, completed: ${is_completed}`);
 
     // 1. Найти или создать турнир
     let { data: dbTournament, error: findError } = await supabase
-      .from('tournaments')
-      .select('*')
-      .eq('name', tournament.name)
-      .single();
+      .from('tournaments').select('*').eq('name', tournament.name).single();
     if (findError && findError.code !== 'PGRST116') throw findError;
 
     if (!dbTournament) {
       const { data: newT, error: insertError } = await supabase
-        .from('tournaments')
-        .insert([{ ...tournament, status: 'upcoming' }])
-        .select()
-        .single();
+        .from('tournaments').insert([{ ...tournament, status: is_completed ? 'completed' : 'upcoming' }])
+        .select().single();
       if (insertError) throw insertError;
       dbTournament = newT;
+      console.log(`🆕 Created tournament id=${dbTournament.id}`);
+    } else {
+      const newStatus = is_completed ? 'completed' : 'upcoming';
+      if (dbTournament.status !== newStatus) {
+        await supabase.from('tournaments').update({ status: newStatus }).eq('id', dbTournament.id);
+        dbTournament.status = newStatus;
+      }
+      console.log(`♻️ Existing tournament id=${dbTournament.id}, status=${dbTournament.status}`);
     }
 
-    // 2. Определить, завершён ли турнир (все бойцы имеют W/L)
-    const allHaveResult = fighters.every(f => f['W/L'] && ['win','lose','draw'].includes(f['W/L'].toLowerCase()));
-    if (allHaveResult) {
-      await supabase.from('tournaments')
-        .update({ status: 'completed' })
-        .eq('id', dbTournament.id);
-    }
-
-    // 3. Обновить/вставить бойцов
+    // 2. Вставка бойцов с защитой от NaN
+    let insertedCount = 0;
     for (const f of fighters) {
-      await supabase.from('fighters').upsert({
+      const fighterData = {
         tournament_id: dbTournament.id,
         fighter_name: f.Fighter,
         weight_class: f['Weight class'],
-        fight_id: f.Fight_ID,
+        fight_id: safeNumber(f.Fight_ID),
         wl: f['W/L']?.toLowerCase() || null,
-        total_damage: f['Total Damage'],
-        method: f.Method,
-        round: f.Round,
-        time: f.Time,
-        str: f.Str,
-        td: f.Td,
-        sub: f.Sub
-      }, { onConflict: 'tournament_id, fighter_name' });
+        total_damage: safeNumber(f['Total Damage']),
+        method: f.Method || '',
+        round: safeNumber(f.Round),
+        time: f.Time || '',
+        str: safeNumber(f.Str),
+        td: safeNumber(f.Td),
+        sub: safeNumber(f.Sub)
+      };
+      const { error } = await supabase.from('fighters').upsert(fighterData, {
+        onConflict: 'tournament_id, fighter_name'
+      });
+      if (error) {
+        console.error(`❌ Fighter insert error for ${f.Fighter}:`, error);
+      } else {
+        insertedCount++;
+      }
     }
+    console.log(`✅ Inserted/updated ${insertedCount} fighters`);
 
-    // 4. Если турнир завершён, обработать ставки
-    if (allHaveResult) {
+    // 3. Если турнир завершён, обработать ставки
+    if (is_completed) {
+      console.log('🏁 Tournament completed, processing bets...');
       const { data: bets } = await supabase
-        .from('bets')
-        .select('*')
-        .eq('tournament_id', dbTournament.id)
-        .eq('cancelled', false);
+        .from('bets').select('*')
+        .eq('tournament_id', dbTournament.id).eq('cancelled', false);
 
       for (const bet of bets) {
         const selections = bet.selections;
@@ -471,7 +401,6 @@ app.post('/api/tournaments/sync', async (req, res) => {
         for (const sel of selections) {
           const fighterData = fighters.find(f => f.Fighter === sel.fighter.Fighter);
           if (fighterData) {
-            // Обогащаем данными о результате
             const enriched = {
               ...sel,
               fighter: {
@@ -489,8 +418,6 @@ app.post('/api/tournaments/sync', async (req, res) => {
             updatedSelections.push(enriched);
             totalDamage += fighterData['Total Damage'];
             if (fighterData['W/L']?.toLowerCase() === 'win') winners++;
-          } else {
-            // Боец не найден – ставка аннулируется (будет обработано ниже)
           }
         }
 
@@ -499,34 +426,21 @@ app.post('/api/tournaments/sync', async (req, res) => {
           const exp = winners * 5;
           const tickets = winners;
 
-          // Сохранить уведомление
           await supabase.from('notifications').insert({
             user_id: bet.user_id,
             type: 'tournament_reward',
             tournament_name: dbTournament.name,
-            data: {
-              coins,
-              tickets,
-              experience: exp,
-              winners: updatedSelections.filter(s => s.fighter['W/L'] === 'win'),
-              allSelections: updatedSelections
-            }
+            data: { coins, tickets, experience: exp, winners: updatedSelections.filter(s => s.fighter['W/L'] === 'win'), allSelections: updatedSelections }
           });
 
-          // Обновить ставку
-          await supabase.from('bets')
-            .update({
-              total_damage: totalDamage,
-              reward_coins: coins,
-              reward_exp: exp,
-              selections: updatedSelections
-            })
-            .eq('id', bet.id);
+          await supabase.from('bets').update({
+            total_damage: totalDamage,
+            reward_coins: coins,
+            reward_exp: exp,
+            selections: updatedSelections
+          }).eq('id', bet.id);
         } else {
-          // Если не все бойцы найдены, помечаем ставку как отменённую и создаём уведомление на возврат
-          await supabase.from('bets')
-            .update({ cancelled: true })
-            .eq('id', bet.id);
+          await supabase.from('bets').update({ cancelled: true }).eq('id', bet.id);
           await supabase.from('notifications').insert({
             user_id: bet.user_id,
             type: 'bet_cancelled',
@@ -545,7 +459,7 @@ app.post('/api/tournaments/sync', async (req, res) => {
 
     res.json({ success: true });
   } catch (err) {
-    console.error(err);
+    console.error('❌ Sync error:', err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -617,13 +531,12 @@ app.post('/api/pvp/start', authenticate, async (req, res) => {
       .eq('id', bestRival.user_id)
       .single();
 
-    // Симуляция боя (упрощённая логика, можно расширить)
+    // Симуляция боя
     const userCards = userBet.selections;
     const rivalCards = bestRival.selections;
 
-    // Вычислить суммарный урон для каждой стороны
-    const userTotal = userCards.reduce((sum, c) => sum + c.fighter['Total Damage'], 0);
-    const rivalTotal = rivalCards.reduce((sum, c) => sum + c.fighter['Total Damage'], 0);
+    const userTotal = userCards.reduce((sum, c) => sum + (c.fighter['Total Damage'] || 0), 0);
+    const rivalTotal = rivalCards.reduce((sum, c) => sum + (c.fighter['Total Damage'] || 0), 0);
 
     let result, resultType, winnerId = null;
     if (userTotal > rivalTotal) {
@@ -657,17 +570,15 @@ app.post('/api/pvp/start', authenticate, async (req, res) => {
       expReward = 4;
     }
 
-    // Начислить награды победителю (если есть)
+    // Начислить награды победителю
     if (winnerId) {
-      const { data: winner } = await supabase.from('users').select('coins, experience, level, exp_points').eq('id', winnerId).single();
+      const { data: winner } = await supabase.from('users').select('coins, experience').eq('id', winnerId).single();
       let newCoins = winner.coins + coinsReward;
       let newExp = winner.experience + expReward;
-      // Расчёт уровня (аналогично claim-all)
-      // ...
       await supabase.from('users').update({ coins: newCoins, experience: newExp }).eq('id', winnerId);
     }
 
-    // Записать бой в pvp_battles (таблицу нужно создать)
+    // Записать бой
     await supabase.from('pvp_battles').insert({
       user_id: userId,
       rival_id: bestRival.user_id,
@@ -679,9 +590,8 @@ app.post('/api/pvp/start', authenticate, async (req, res) => {
       rival_total_damage: rivalTotal
     });
 
-    // Подготовить ответ с данными для анимации
     const battleScript = {
-      rounds: 1, // можно позже добавить раунды
+      rounds: 1,
       events: [
         { type: 'countdown' },
         { type: 'damage', userDamage: userTotal, rivalDamage: rivalTotal }
