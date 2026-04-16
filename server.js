@@ -1,4 +1,4 @@
-// server.js – ПОЛНЫЙ ФАЙЛ с правильными весовыми категориями и возвратом баланса
+// server.js – ПОЛНЫЙ ФАЙЛ с округлением total_damage
 require('dotenv').config();
 const express = require('express');
 const { createClient } = require('@supabase/supabase-js');
@@ -340,7 +340,7 @@ app.get('/api/leaderboard/:tournamentId', async (req, res) => {
   }
 });
 
-// ---------- СИНХРОНИЗАЦИЯ ОТ ПАРСЕРА ----------
+// ---------- СИНХРОНИЗАЦИЯ ОТ ПАРСЕРА (с округлением total_damage) ----------
 app.post('/api/tournaments/sync', async (req, res) => {
   try {
     const { tournament, fighters, is_completed } = req.body;
@@ -374,7 +374,7 @@ app.post('/api/tournaments/sync', async (req, res) => {
         weight_class: f['Weight class'],
         fight_id: safeNumber(f.Fight_ID),
         wl: f['W/L']?.toLowerCase() || null,
-        total_damage: safeNumber(f['Total Damage']),
+        total_damage: Math.round(safeNumber(f['Total Damage'])), // <-- ОКРУГЛЕНИЕ
         method: f.Method || '',
         round: safeNumber(f.Round),
         time: f.Time || '',
@@ -413,7 +413,7 @@ app.post('/api/tournaments/sync', async (req, res) => {
               fighter: {
                 ...sel.fighter,
                 'W/L': fighterData['W/L']?.toLowerCase(),
-                'Total Damage': fighterData['Total Damage'],
+                'Total Damage': Math.round(safeNumber(fighterData['Total Damage'])),
                 Method: fighterData.Method,
                 Round: fighterData.Round,
                 Time: fighterData.Time,
@@ -423,7 +423,7 @@ app.post('/api/tournaments/sync', async (req, res) => {
               }
             };
             updatedSelections.push(enriched);
-            totalDamage += fighterData['Total Damage'];
+            totalDamage += Math.round(safeNumber(fighterData['Total Damage']));
             if (fighterData['W/L']?.toLowerCase() === 'win') winners++;
           }
         }
@@ -471,7 +471,7 @@ app.post('/api/tournaments/sync', async (req, res) => {
   }
 });
 
-// ---------- ФУНКЦИЯ ГЕНЕРАЦИИ СЦЕНАРИЯ БОЯ (с полным списком весовых категорий турнира) ----------
+// ---------- ФУНКЦИЯ ГЕНЕРАЦИИ СЦЕНАРИЯ БОЯ ----------
 function calculateBattleScript(userCards, rivalCards, allTournamentWeightClasses) {
   const events = [];
   let currentUserHealth = 1000;
@@ -603,7 +603,9 @@ app.post('/api/pvp/start', authenticate, async (req, res) => {
       .select('weight_class')
       .eq('tournament_id', tournamentId);
     if (fightersError) throw fightersError;
+    
     const allWeightClasses = [...new Set(tournamentFighters.map(f => f.weight_class))];
+    console.log(`📊 Weight classes for tournament ${tournamentId}:`, allWeightClasses);
 
     // 4. Поиск соперника
     const { data: rivals, error: rivalError } = await supabase
@@ -615,7 +617,6 @@ app.post('/api/pvp/start', authenticate, async (req, res) => {
 
     if (rivalError) throw rivalError;
     if (!rivals || rivals.length === 0) {
-      // Возврат
       await supabase.from('users')
         .update({ coins: user.coins, tickets: user.tickets })
         .eq('id', userId);
@@ -645,7 +646,7 @@ app.post('/api/pvp/start', authenticate, async (req, res) => {
     const userCards = userBet.selections;
     const rivalCards = bestRival.selections;
 
-    // Генерация сценария с полным списком весовых категорий турнира
+    // Генерация сценария
     const battleEvents = calculateBattleScript(userCards, rivalCards, allWeightClasses);
 
     // Определение результата и наград
@@ -684,7 +685,7 @@ app.post('/api/pvp/start', authenticate, async (req, res) => {
       rival_total_damage: rivalCards.reduce((s, c) => s + c.fighter['Total Damage'], 0)
     });
 
-    // Получить актуальный баланс пользователя для ответа
+    // Актуальный баланс
     const { data: updatedUser } = await supabase
       .from('users')
       .select('coins, tickets')
