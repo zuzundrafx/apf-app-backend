@@ -1,4 +1,4 @@
-// server.js – ПОЛНЫЙ ФАЙЛ с исправлением дублирования уведомлений и сохранением ID бойцов
+// server.js – ПОЛНЫЙ ФАЙЛ с правильным расчётом коэффициента PvP
 require('dotenv').config();
 const express = require('express');
 const { createClient } = require('@supabase/supabase-js');
@@ -340,7 +340,7 @@ app.get('/api/leaderboard/:tournamentId', async (req, res) => {
   }
 });
 
-// ---------- СИНХРОНИЗАЦИЯ ОТ ПАРСЕРА (исправлено) ----------
+// ---------- СИНХРОНИЗАЦИЯ ОТ ПАРСЕРА ----------
 app.post('/api/tournaments/sync', async (req, res) => {
   try {
     const { tournament, fighters, is_completed } = req.body;
@@ -366,10 +366,8 @@ app.post('/api/tournaments/sync', async (req, res) => {
       console.log(`♻️ Existing tournament id=${dbTournament.id}, status=${dbTournament.status}`);
     }
 
-    // Вставка/обновление бойцов с сохранением ID
     let insertedCount = 0;
     for (const f of fighters) {
-      // Ищем существующего бойца
       const { data: existing } = await supabase
         .from('fighters')
         .select('id')
@@ -393,31 +391,20 @@ app.post('/api/tournaments/sync', async (req, res) => {
       };
 
       if (existing) {
-        // Обновляем существующую запись (ID не меняется)
         const { error } = await supabase
           .from('fighters')
           .update(fighterData)
           .eq('id', existing.id);
-        if (error) {
-          console.error(`❌ Fighter update error for ${f.Fighter}:`, error);
-        } else {
-          insertedCount++;
-        }
+        if (!error) insertedCount++;
       } else {
-        // Вставляем новую запись
         const { error } = await supabase
           .from('fighters')
           .insert([fighterData]);
-        if (error) {
-          console.error(`❌ Fighter insert error for ${f.Fighter}:`, error);
-        } else {
-          insertedCount++;
-        }
+        if (!error) insertedCount++;
       }
     }
     console.log(`✅ Inserted/updated ${insertedCount} fighters`);
 
-    // Обработка ставок, если турнир завершён
     if (is_completed) {
       console.log('🏁 Tournament completed, processing bets...');
       const { data: bets } = await supabase
@@ -426,11 +413,7 @@ app.post('/api/tournaments/sync', async (req, res) => {
         .eq('cancelled', false);
 
       for (const bet of bets) {
-        // Пропускаем, если награды уже созданы
-        if (bet.rewards_created) {
-          console.log(`⏭️ Skipping bet ${bet.id} - rewards already created`);
-          continue;
-        }
+        if (bet.rewards_created) continue;
 
         const selections = bet.selections;
         let winners = 0;
@@ -465,7 +448,6 @@ app.post('/api/tournaments/sync', async (req, res) => {
           const exp = winners * 5;
           const tickets = winners;
 
-          // Создаём уведомление
           await supabase.from('notifications').insert({
             user_id: bet.user_id,
             type: 'tournament_reward',
@@ -473,7 +455,6 @@ app.post('/api/tournaments/sync', async (req, res) => {
             data: { coins, tickets, experience: exp, winners: updatedSelections.filter(s => s.fighter['W/L'] === 'win'), allSelections: updatedSelections }
           });
 
-          // Обновляем ставку: итоговый урон, награды и флаг rewards_created
           await supabase.from('bets').update({
             total_damage: totalDamage,
             reward_coins: coins,
@@ -506,7 +487,7 @@ app.post('/api/tournaments/sync', async (req, res) => {
   }
 });
 
-// ---------- ФУНКЦИЯ ГЕНЕРАЦИИ СЦЕНАРИЯ БОЯ ----------
+// ---------- ФУНКЦИЯ ГЕНЕРАЦИИ СЦЕНАРИЯ БОЯ (возвращает также winningRound) ----------
 function calculateBattleScript(userCards, rivalCards, allTournamentWeightClasses) {
   const events = [];
   let currentUserHealth = 1000;
@@ -567,16 +548,16 @@ function calculateBattleScript(userCards, rivalCards, allTournamentWeightClasses
     });
 
     if (currentRivalHealth <= 0 && currentUserHealth > 0) {
-      events.push({ type: 'battle-end', result: { isOpen: true, result: 'win', resultType: 'ko' } });
-      return events;
+      events.push({ type: 'battle-end', result: { isOpen: true, result: 'win', resultType: 'ko' }, winningRound: round });
+      return { events, winningRound: round };
     }
     if (currentUserHealth <= 0 && currentRivalHealth > 0) {
-      events.push({ type: 'battle-end', result: { isOpen: true, result: 'loss', resultType: 'ko' } });
-      return events;
+      events.push({ type: 'battle-end', result: { isOpen: true, result: 'loss', resultType: 'ko' }, winningRound: round });
+      return { events, winningRound: round };
     }
     if (currentUserHealth <= 0 && currentRivalHealth <= 0) {
-      events.push({ type: 'battle-end', result: { isOpen: true, result: 'draw' } });
-      return events;
+      events.push({ type: 'battle-end', result: { isOpen: true, result: 'draw' }, winningRound: round });
+      return { events, winningRound: round };
     }
 
     if (round < 5) events.push({ type: 'round-end', round });
@@ -592,7 +573,7 @@ function calculateBattleScript(userCards, rivalCards, allTournamentWeightClasses
     result = { isOpen: true, result: 'draw' };
   }
   events.push({ type: 'battle-end', result });
-  return events;
+  return { events, winningRound: 5 };
 }
 
 // ---------- PVP ----------
@@ -603,7 +584,6 @@ app.post('/api/pvp/start', authenticate, async (req, res) => {
 
     console.log(`🎮 PvP start: userId=${userId}, tournamentId=${tournamentId}, betAmount=${betAmount}`);
 
-    // 1. Ставка пользователя
     const { data: userBet, error: betError } = await supabase
       .from('bets')
       .select('total_damage, selections')
@@ -616,7 +596,6 @@ app.post('/api/pvp/start', authenticate, async (req, res) => {
       return res.status(400).json({ error: 'No valid bet found for this tournament' });
     }
 
-    // 2. Баланс
     const { data: user, error: userError } = await supabase
       .from('users')
       .select('coins, tickets')
@@ -627,12 +606,10 @@ app.post('/api/pvp/start', authenticate, async (req, res) => {
       return res.status(400).json({ error: 'Not enough coins or tickets' });
     }
 
-    // Списание
     await supabase.from('users')
       .update({ coins: user.coins - betAmount, tickets: user.tickets - 1 })
       .eq('id', userId);
 
-    // 3. Получить все весовые категории турнира из таблицы fighters
     const { data: tournamentFighters, error: fightersError } = await supabase
       .from('fighters')
       .select('weight_class')
@@ -642,7 +619,6 @@ app.post('/api/pvp/start', authenticate, async (req, res) => {
     const allWeightClasses = [...new Set(tournamentFighters.map(f => f.weight_class))];
     console.log(`📊 Weight classes for tournament ${tournamentId}:`, allWeightClasses);
 
-    // 4. Поиск соперника
     const { data: rivals, error: rivalError } = await supabase
       .from('bets')
       .select('user_id, total_damage, selections')
@@ -658,7 +634,6 @@ app.post('/api/pvp/start', authenticate, async (req, res) => {
       return res.status(400).json({ error: 'No opponents available' });
     }
 
-    // Выбор ближайшего по total_damage
     const userDamage = userBet.total_damage;
     let bestRival = rivals[0];
     let minDiff = Math.abs(userDamage - bestRival.total_damage);
@@ -670,36 +645,47 @@ app.post('/api/pvp/start', authenticate, async (req, res) => {
       }
     }
 
-    // Профиль соперника
     const { data: rivalProfile } = await supabase
       .from('users')
       .select('username, photo_url')
       .eq('id', bestRival.user_id)
       .single();
 
-    // Карты
     const userCards = userBet.selections;
     const rivalCards = bestRival.selections;
 
-    // Генерация сценария
-    const battleEvents = calculateBattleScript(userCards, rivalCards, allWeightClasses);
+    const { events: battleEvents, winningRound } = calculateBattleScript(userCards, rivalCards, allWeightClasses);
 
-    // Определение результата и наград
     const lastEvent = battleEvents[battleEvents.length - 1];
     const { result, resultType } = lastEvent.result;
 
+    let baseCoeff = 0;
+    if (result === 'win') {
+      if (resultType === 'ko') baseCoeff = 2.0;
+      else if (resultType === 'decision-unanimous') baseCoeff = 1.5;
+      else if (resultType === 'decision-split') baseCoeff = 1.2;
+    } else if (result === 'draw') {
+      baseCoeff = 1.0;
+    }
+
+    // Бонус за досрочную победу (каждый неотыгранный раунд +0.1)
+    let winCoefficient = baseCoeff;
+    if (result === 'win' && resultType === 'ko' && winningRound < 5) {
+      const roundsNotFought = 5 - winningRound;
+      winCoefficient = baseCoeff + roundsNotFought * 0.1;
+    }
+
     let coinsReward = 0, expReward = 0;
     if (result === 'win') {
-      coinsReward = resultType === 'decision-unanimous' ? Math.ceil(betAmount * 1.5) : Math.ceil(betAmount * 1.2);
-      expReward = resultType === 'decision-unanimous' ? 7 : 5;
+      coinsReward = Math.ceil(betAmount * winCoefficient);
+      expReward = resultType === 'ko' ? 10 : (resultType === 'decision-unanimous' ? 7 : 5);
     } else if (result === 'loss') {
-      expReward = resultType === 'decision-unanimous' ? 2 : 3;
+      expReward = resultType === 'ko' ? 1 : (resultType === 'decision-unanimous' ? 2 : 3);
     } else if (result === 'draw') {
       coinsReward = betAmount;
       expReward = 4;
     }
 
-    // Начисление победителю
     const winnerId = result === 'win' ? userId : (result === 'loss' ? bestRival.user_id : null);
     if (winnerId) {
       const { data: winner } = await supabase.from('users').select('coins, experience').eq('id', winnerId).single();
@@ -708,7 +694,6 @@ app.post('/api/pvp/start', authenticate, async (req, res) => {
         .eq('id', winnerId);
     }
 
-    // Запись боя
     await supabase.from('pvp_battles').insert({
       user_id: userId,
       rival_id: bestRival.user_id,
@@ -720,7 +705,6 @@ app.post('/api/pvp/start', authenticate, async (req, res) => {
       rival_total_damage: rivalCards.reduce((s, c) => s + c.fighter['Total Damage'], 0)
     });
 
-    // Актуальный баланс
     const { data: updatedUser } = await supabase
       .from('users')
       .select('coins, tickets')
