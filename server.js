@@ -1,4 +1,4 @@
-// server.js – ПОЛНЫЙ ФАЙЛ с правильным расчётом коэффициента PvP
+// server.js – ПОЛНЫЙ ФАЙЛ с расчётом уровней на сервере
 require('dotenv').config();
 const express = require('express');
 const { createClient } = require('@supabase/supabase-js');
@@ -35,12 +35,28 @@ function authenticate(req, res, next) {
   }
 }
 
-// Вспомогательная функция
 const safeNumber = (val) => {
   if (val === null || val === undefined || val === '') return 0;
   const num = Number(val);
   return isNaN(num) ? 0 : num;
 };
+
+// Пороги опыта для уровней
+const LEVEL_THRESHOLDS = [5, 10, 15, 20, 25, 30, 35, 40, 45, 0];
+
+function calculateLevel(totalExp) {
+  let remainingExp = totalExp;
+  let level = 1;
+  for (let i = 0; i < LEVEL_THRESHOLDS.length - 1; i++) {
+    const expNeeded = LEVEL_THRESHOLDS[i];
+    if (remainingExp >= expNeeded) {
+      remainingExp -= expNeeded;
+      level = i + 2;
+    } else break;
+  }
+  const nextLevelExp = level < 10 ? LEVEL_THRESHOLDS[level - 1] : 0;
+  return { level, currentExp: remainingExp, nextLevelExp };
+}
 
 // ---------- АВТОРИЗАЦИЯ ----------
 app.post('/api/auth/telegram', async (req, res) => {
@@ -78,7 +94,17 @@ app.post('/api/auth/telegram', async (req, res) => {
       { userId: existingUser.id, username: existingUser.username },
       JWT_SECRET, { expiresIn: '7d' }
     );
-    res.json({ token, user: existingUser });
+    // Отправляем полные данные с рассчитанными уровнями
+    const { level, currentExp, nextLevelExp } = calculateLevel(existingUser.experience);
+    res.json({
+      token,
+      user: {
+        ...existingUser,
+        level,
+        currentExp,
+        nextLevelExp
+      }
+    });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message });
@@ -91,7 +117,13 @@ app.get('/api/user/profile', authenticate, async (req, res) => {
     const { data: user, error } = await supabase
       .from('users').select('*').eq('id', req.user.userId).single();
     if (error) throw error;
-    res.json(user);
+    const { level, currentExp, nextLevelExp } = calculateLevel(user.experience);
+    res.json({
+      ...user,
+      level,
+      currentExp,
+      nextLevelExp
+    });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message });
@@ -243,15 +275,7 @@ app.post('/api/notifications/claim-all', authenticate, async (req, res) => {
       const newTickets = user.tickets + totalTickets;
       const newExp = user.experience + totalExp;
 
-      const LEVEL_THRESHOLDS = [5, 10, 15, 20, 25, 30, 35, 40, 45];
-      let level = user.level;
-      let remainingExp = newExp;
-      for (let i = 0; i < LEVEL_THRESHOLDS.length; i++) {
-        if (remainingExp >= LEVEL_THRESHOLDS[i]) {
-          remainingExp -= LEVEL_THRESHOLDS[i];
-          level = i + 2;
-        } else break;
-      }
+      const { level, currentExp, nextLevelExp } = calculateLevel(newExp);
       let newExpPoints = user.exp_points;
       if (level > user.level) newExpPoints += (level - user.level);
 
@@ -268,11 +292,15 @@ app.post('/api/notifications/claim-all', authenticate, async (req, res) => {
 
     const { data: updatedUser } = await supabase
       .from('users').select('coins, tickets, experience').eq('id', userId).single();
+    const { level, currentExp, nextLevelExp } = calculateLevel(updatedUser.experience);
     res.json({
       success: true,
       newCoins: updatedUser.coins,
       newTickets: updatedUser.tickets,
-      newExp: updatedUser.experience
+      newExp: updatedUser.experience,
+      level,
+      currentExp,
+      nextLevelExp
     });
   } catch (err) {
     console.error(err);
@@ -487,7 +515,7 @@ app.post('/api/tournaments/sync', async (req, res) => {
   }
 });
 
-// ---------- ФУНКЦИЯ ГЕНЕРАЦИИ СЦЕНАРИЯ БОЯ (возвращает также winningRound) ----------
+// ---------- ФУНКЦИЯ ГЕНЕРАЦИИ СЦЕНАРИЯ БОЯ ----------
 function calculateBattleScript(userCards, rivalCards, allTournamentWeightClasses) {
   const events = [];
   let currentUserHealth = 1000;
@@ -548,15 +576,15 @@ function calculateBattleScript(userCards, rivalCards, allTournamentWeightClasses
     });
 
     if (currentRivalHealth <= 0 && currentUserHealth > 0) {
-      events.push({ type: 'battle-end', result: { isOpen: true, result: 'win', resultType: 'ko' }, winningRound: round });
+      events.push({ type: 'battle-end', result: { isOpen: true, result: 'win', resultType: 'ko' } });
       return { events, winningRound: round };
     }
     if (currentUserHealth <= 0 && currentRivalHealth > 0) {
-      events.push({ type: 'battle-end', result: { isOpen: true, result: 'loss', resultType: 'ko' }, winningRound: round });
+      events.push({ type: 'battle-end', result: { isOpen: true, result: 'loss', resultType: 'ko' } });
       return { events, winningRound: round };
     }
     if (currentUserHealth <= 0 && currentRivalHealth <= 0) {
-      events.push({ type: 'battle-end', result: { isOpen: true, result: 'draw' }, winningRound: round });
+      events.push({ type: 'battle-end', result: { isOpen: true, result: 'draw' } });
       return { events, winningRound: round };
     }
 
@@ -668,12 +696,13 @@ app.post('/api/pvp/start', authenticate, async (req, res) => {
       baseCoeff = 1.0;
     }
 
-    // Бонус за досрочную победу (каждый неотыгранный раунд +0.1)
     let winCoefficient = baseCoeff;
     if (result === 'win' && resultType === 'ko' && winningRound < 5) {
       const roundsNotFought = 5 - winningRound;
       winCoefficient = baseCoeff + roundsNotFought * 0.1;
     }
+
+    console.log(`🏆 Result: ${result} ${resultType || ''}, winningRound: ${winningRound}, winCoefficient: ${winCoefficient}`);
 
     let coinsReward = 0, expReward = 0;
     if (result === 'win') {
