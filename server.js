@@ -1,4 +1,4 @@
-// server.js – ПОЛНЫЙ ФАЙЛ со всеми исправлениями
+// server.js – ПОЛНЫЙ ФАЙЛ с расширенным логированием PvP
 require('dotenv').config();
 const express = require('express');
 const { createClient } = require('@supabase/supabase-js');
@@ -471,14 +471,19 @@ app.post('/api/tournaments/sync', async (req, res) => {
   }
 });
 
-// ---------- PVP (с логированием) ----------
+// ---------- PVP (с подробным логом) ----------
 app.post('/api/pvp/start', authenticate, async (req, res) => {
   try {
     const { tournamentId, betAmount } = req.body;
     const userId = req.user.userId;
 
-    console.log(`🎮 PvP start: userId=${userId}, tournamentId=${tournamentId}, betAmount=${betAmount}`);
+    console.log('═══════════════════════════════════════');
+    console.log(`🎮 PvP start request`);
+    console.log(`   userId: ${userId}`);
+    console.log(`   tournamentId: ${tournamentId}`);
+    console.log(`   betAmount: ${betAmount}`);
 
+    // 1. Ставка пользователя
     const { data: userBet, error: betError } = await supabase
       .from('bets')
       .select('total_damage, selections')
@@ -486,31 +491,33 @@ app.post('/api/pvp/start', authenticate, async (req, res) => {
       .eq('tournament_id', tournamentId)
       .eq('cancelled', false)
       .single();
+
     if (betError) {
-      console.error('❌ User bet error:', betError);
+      console.error(`❌ User bet not found:`, betError.message);
       return res.status(400).json({ error: 'No valid bet found for this tournament' });
     }
-    console.log(`✅ User bet found, total_damage=${userBet.total_damage}`);
+    console.log(`✅ User bet found, total_damage = ${userBet.total_damage}`);
 
+    // 2. Баланс
     const { data: user, error: userError } = await supabase
       .from('users')
       .select('coins, tickets')
       .eq('id', userId)
       .single();
-    if (userError) {
-      console.error('❌ User fetch error:', userError);
-      throw userError;
-    }
+    if (userError) throw userError;
     if (user.coins < betAmount || user.tickets < 1) {
+      console.log(`💰 Insufficient funds: coins=${user.coins}, tickets=${user.tickets}`);
       return res.status(400).json({ error: 'Not enough coins or tickets' });
     }
 
+    // Списание
     await supabase.from('users')
       .update({ coins: user.coins - betAmount, tickets: user.tickets - 1 })
       .eq('id', userId);
-    console.log(`💰 Spent ${betAmount} coins and 1 ticket.`);
+    console.log(`💰 Spent ${betAmount} coins and 1 ticket`);
 
-    console.log(`🔍 Looking for rivals in tournament ${tournamentId}, excluding user ${userId}`);
+    // 3. Поиск соперников
+    console.log(`🔍 Querying rivals: tournament_id = ${tournamentId}, exclude user_id = "${userId}"`);
     const { data: rivals, error: rivalError } = await supabase
       .from('bets')
       .select('user_id, total_damage, selections')
@@ -519,19 +526,25 @@ app.post('/api/pvp/start', authenticate, async (req, res) => {
       .neq('user_id', userId);
 
     if (rivalError) {
-      console.error('❌ Rivals query error:', rivalError);
+      console.error(`❌ Rivals query error:`, rivalError);
       throw rivalError;
     }
 
     console.log(`👥 Rivals found: ${rivals?.length || 0}`);
+    if (rivals && rivals.length > 0) {
+      rivals.forEach((r, i) => console.log(`   ${i+1}. user_id="${r.user_id}", total_damage=${r.total_damage}`));
+    }
+
     if (!rivals || rivals.length === 0) {
+      // Возврат
       await supabase.from('users')
         .update({ coins: user.coins, tickets: user.tickets })
         .eq('id', userId);
-      console.log('↩️ No rivals, refunded');
+      console.log(`↩️ No rivals, refunded coins and ticket`);
       return res.status(400).json({ error: 'No opponents available' });
     }
 
+    // 4. Выбор ближайшего по total_damage
     const userDamage = userBet.total_damage;
     let bestRival = rivals[0];
     let minDiff = Math.abs(userDamage - bestRival.total_damage);
@@ -542,14 +555,17 @@ app.post('/api/pvp/start', authenticate, async (req, res) => {
         bestRival = r;
       }
     }
-    console.log(`🤝 Selected rival: ${bestRival.user_id}, total_damage=${bestRival.total_damage}`);
+    console.log(`🤝 Selected rival: "${bestRival.user_id}" (damage diff = ${minDiff})`);
 
+    // 5. Профиль соперника
     const { data: rivalProfile } = await supabase
       .from('users')
       .select('username, photo_url')
       .eq('id', bestRival.user_id)
       .single();
+    console.log(`👤 Rival profile: ${rivalProfile?.username || 'not found'}`);
 
+    // 6. Симуляция
     const userCards = userBet.selections;
     const rivalCards = bestRival.selections;
     const userTotal = userCards.reduce((sum, c) => sum + (c.fighter['Total Damage'] || 0), 0);
@@ -568,6 +584,7 @@ app.post('/api/pvp/start', authenticate, async (req, res) => {
       result = 'draw';
     }
 
+    // 7. Награды
     let coinsReward = 0, expReward = 0;
     if (result === 'win') {
       coinsReward = resultType === 'decision-unanimous' ? Math.ceil(betAmount * 1.5) : Math.ceil(betAmount * 1.2);
@@ -584,9 +601,10 @@ app.post('/api/pvp/start', authenticate, async (req, res) => {
       await supabase.from('users')
         .update({ coins: winner.coins + coinsReward, experience: winner.experience + expReward })
         .eq('id', winnerId);
-      console.log(`🏆 Winner ${winnerId} gets ${coinsReward} coins, ${expReward} exp`);
+      console.log(`🏆 Winner ${winnerId} awarded ${coinsReward} coins, ${expReward} exp`);
     }
 
+    // 8. Запись боя
     await supabase.from('pvp_battles').insert({
       user_id: userId,
       rival_id: bestRival.user_id,
@@ -597,6 +615,9 @@ app.post('/api/pvp/start', authenticate, async (req, res) => {
       user_total_damage: userTotal,
       rival_total_damage: rivalTotal
     });
+
+    console.log('✅ PvP battle recorded successfully');
+    console.log('═══════════════════════════════════════');
 
     const battleScript = {
       rounds: 1,
@@ -618,7 +639,7 @@ app.post('/api/pvp/start', authenticate, async (req, res) => {
       }
     });
   } catch (err) {
-    console.error('❌ PvP error:', err);
+    console.error('❌ PvP fatal error:', err);
     res.status(500).json({ error: err.message });
   }
 });
