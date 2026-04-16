@@ -13,6 +13,11 @@ const supabaseKey = process.env.SUPABASE_ANON_KEY;
 const supabase = createClient(supabaseUrl, supabaseKey);
 const JWT_SECRET = process.env.JWT_SECRET || 'your_secret_key';
 
+console.log('##################################################');
+console.log(`### NEW DEPLOY: ${new Date().toISOString()} ###`);
+console.log('### VERSION: PvP-debug-2026-04-16-17-00 ###');
+console.log('##################################################');
+
 app.use(cors({
   origin: ['https://apf-app.vercel.app', 'http://localhost:5173'],
   credentials: true
