@@ -1,4 +1,4 @@
-// server.js – ПОЛНЫЙ ФАЙЛ с округлением total_damage
+// server.js – ПОЛНЫЙ ФАЙЛ с исправлением дублирования уведомлений и сохранением ID бойцов
 require('dotenv').config();
 const express = require('express');
 const { createClient } = require('@supabase/supabase-js');
@@ -340,7 +340,7 @@ app.get('/api/leaderboard/:tournamentId', async (req, res) => {
   }
 });
 
-// ---------- СИНХРОНИЗАЦИЯ ОТ ПАРСЕРА (с округлением total_damage) ----------
+// ---------- СИНХРОНИЗАЦИЯ ОТ ПАРСЕРА (исправлено) ----------
 app.post('/api/tournaments/sync', async (req, res) => {
   try {
     const { tournament, fighters, is_completed } = req.body;
@@ -366,15 +366,24 @@ app.post('/api/tournaments/sync', async (req, res) => {
       console.log(`♻️ Existing tournament id=${dbTournament.id}, status=${dbTournament.status}`);
     }
 
+    // Вставка/обновление бойцов с сохранением ID
     let insertedCount = 0;
     for (const f of fighters) {
+      // Ищем существующего бойца
+      const { data: existing } = await supabase
+        .from('fighters')
+        .select('id')
+        .eq('tournament_id', dbTournament.id)
+        .eq('fighter_name', f.Fighter)
+        .maybeSingle();
+
       const fighterData = {
         tournament_id: dbTournament.id,
         fighter_name: f.Fighter,
         weight_class: f['Weight class'],
         fight_id: safeNumber(f.Fight_ID),
         wl: f['W/L']?.toLowerCase() || null,
-        total_damage: Math.round(safeNumber(f['Total Damage'])), // <-- ОКРУГЛЕНИЕ
+        total_damage: Math.round(safeNumber(f['Total Damage'])),
         method: f.Method || '',
         round: safeNumber(f.Round),
         time: f.Time || '',
@@ -382,24 +391,47 @@ app.post('/api/tournaments/sync', async (req, res) => {
         td: safeNumber(f.Td),
         sub: safeNumber(f.Sub)
       };
-      const { error } = await supabase.from('fighters').upsert(fighterData, {
-        onConflict: 'tournament_id, fighter_name'
-      });
-      if (error) {
-        console.error(`❌ Fighter insert error for ${f.Fighter}:`, error);
+
+      if (existing) {
+        // Обновляем существующую запись (ID не меняется)
+        const { error } = await supabase
+          .from('fighters')
+          .update(fighterData)
+          .eq('id', existing.id);
+        if (error) {
+          console.error(`❌ Fighter update error for ${f.Fighter}:`, error);
+        } else {
+          insertedCount++;
+        }
       } else {
-        insertedCount++;
+        // Вставляем новую запись
+        const { error } = await supabase
+          .from('fighters')
+          .insert([fighterData]);
+        if (error) {
+          console.error(`❌ Fighter insert error for ${f.Fighter}:`, error);
+        } else {
+          insertedCount++;
+        }
       }
     }
     console.log(`✅ Inserted/updated ${insertedCount} fighters`);
 
+    // Обработка ставок, если турнир завершён
     if (is_completed) {
       console.log('🏁 Tournament completed, processing bets...');
       const { data: bets } = await supabase
         .from('bets').select('*')
-        .eq('tournament_id', dbTournament.id).eq('cancelled', false);
+        .eq('tournament_id', dbTournament.id)
+        .eq('cancelled', false);
 
       for (const bet of bets) {
+        // Пропускаем, если награды уже созданы
+        if (bet.rewards_created) {
+          console.log(`⏭️ Skipping bet ${bet.id} - rewards already created`);
+          continue;
+        }
+
         const selections = bet.selections;
         let winners = 0;
         let totalDamage = 0;
@@ -433,6 +465,7 @@ app.post('/api/tournaments/sync', async (req, res) => {
           const exp = winners * 5;
           const tickets = winners;
 
+          // Создаём уведомление
           await supabase.from('notifications').insert({
             user_id: bet.user_id,
             type: 'tournament_reward',
@@ -440,11 +473,13 @@ app.post('/api/tournaments/sync', async (req, res) => {
             data: { coins, tickets, experience: exp, winners: updatedSelections.filter(s => s.fighter['W/L'] === 'win'), allSelections: updatedSelections }
           });
 
+          // Обновляем ставку: итоговый урон, награды и флаг rewards_created
           await supabase.from('bets').update({
             total_damage: totalDamage,
             reward_coins: coins,
             reward_exp: exp,
-            selections: updatedSelections
+            selections: updatedSelections,
+            rewards_created: true
           }).eq('id', bet.id);
         } else {
           await supabase.from('bets').update({ cancelled: true }).eq('id', bet.id);
