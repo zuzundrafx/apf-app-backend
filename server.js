@@ -1,4 +1,4 @@
-// server.js – ПОЛНЫЙ ФАЙЛ с расчётом уровней на сервере render.com
+// server.js – ПОЛНЫЙ ФАЙЛ с возвратом уровней в PvP
 require('dotenv').config();
 const express = require('express');
 const { createClient } = require('@supabase/supabase-js');
@@ -41,7 +41,6 @@ const safeNumber = (val) => {
   return isNaN(num) ? 0 : num;
 };
 
-// Пороги опыта для уровней
 const LEVEL_THRESHOLDS = [5, 10, 15, 20, 25, 30, 35, 40, 45, 0];
 
 function calculateLevel(totalExp) {
@@ -94,7 +93,6 @@ app.post('/api/auth/telegram', async (req, res) => {
       { userId: existingUser.id, username: existingUser.username },
       JWT_SECRET, { expiresIn: '7d' }
     );
-    // Отправляем полные данные с рассчитанными уровнями
     const { level, currentExp, nextLevelExp } = calculateLevel(existingUser.experience);
     res.json({
       token,
@@ -716,11 +714,24 @@ app.post('/api/pvp/start', authenticate, async (req, res) => {
     }
 
     const winnerId = result === 'win' ? userId : (result === 'loss' ? bestRival.user_id : null);
+    let updatedWinner = null;
     if (winnerId) {
       const { data: winner } = await supabase.from('users').select('coins, experience').eq('id', winnerId).single();
+      const newExp = winner.experience + expReward;
+      const newCoins = winner.coins + coinsReward;
       await supabase.from('users')
-        .update({ coins: winner.coins + coinsReward, experience: winner.experience + expReward })
+        .update({ coins: newCoins, experience: newExp })
         .eq('id', winnerId);
+      
+      const { level, currentExp, nextLevelExp } = calculateLevel(newExp);
+      updatedWinner = {
+        userId: winnerId,
+        coins: newCoins,
+        totalExp: newExp,
+        level,
+        currentExp,
+        nextLevelExp
+      };
     }
 
     await supabase.from('pvp_battles').insert({
@@ -752,7 +763,8 @@ app.post('/api/pvp/start', authenticate, async (req, res) => {
       updatedBalance: {
         coins: updatedUser.coins,
         tickets: updatedUser.tickets
-      }
+      },
+      updatedWinner: updatedWinner // ← содержит новый опыт и уровень победителя
     });
   } catch (err) {
     console.error('❌ PvP error:', err);
