@@ -1,4 +1,4 @@
-// server.js – ПОЛНЫЙ ФАЙЛ с расчётом уровней на сервере
+// server.js – ПОЛНЫЙ ФАЙЛ с расчётом уровней на сервере render.com
 require('dotenv').config();
 const express = require('express');
 const { createClient } = require('@supabase/supabase-js');
