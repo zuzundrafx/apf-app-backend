@@ -714,25 +714,42 @@ app.post('/api/pvp/start', authenticate, async (req, res) => {
     }
 
     const winnerId = result === 'win' ? userId : (result === 'loss' ? bestRival.user_id : null);
-    let updatedWinner = null;
-    if (winnerId) {
-      const { data: winner } = await supabase.from('users').select('coins, experience').eq('id', winnerId).single();
-      const newExp = winner.experience + expReward;
-      const newCoins = winner.coins + coinsReward;
-      await supabase.from('users')
-        .update({ coins: newCoins, experience: newExp })
-        .eq('id', winnerId);
-      
-      const { level, currentExp, nextLevelExp } = calculateLevel(newExp);
-      updatedWinner = {
-        userId: winnerId,
-        coins: newCoins,
-        totalExp: newExp,
-        level,
-        currentExp,
-        nextLevelExp
-      };
-    }
+let updatedWinner = null;
+if (winnerId) {
+  const { data: winner } = await supabase
+    .from('users')
+    .select('coins, experience, level, exp_points')
+    .eq('id', winnerId)
+    .single();
+  
+  const newExp = winner.experience + expReward;
+  const newCoins = winner.coins + coinsReward;
+  
+  const { level, currentExp, nextLevelExp } = calculateLevel(newExp);
+  let newExpPoints = winner.exp_points;
+  if (level > winner.level) {
+    newExpPoints += (level - winner.level);
+  }
+  
+  await supabase.from('users')
+    .update({
+      coins: newCoins,
+      experience: newExp,
+      level: level,
+      exp_points: newExpPoints
+    })
+    .eq('id', winnerId);
+  
+  updatedWinner = {
+    userId: winnerId,
+    coins: newCoins,
+    totalExp: newExp,
+    level,
+    currentExp,
+    nextLevelExp,
+    expPoints: newExpPoints
+  };
+}
 
     await supabase.from('pvp_battles').insert({
       user_id: userId,
