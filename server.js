@@ -306,6 +306,74 @@ app.post('/api/notifications/claim-all', authenticate, async (req, res) => {
   }
 });
 
+// Начисление награды по конкретному уведомлению
+app.post('/api/notifications/:id/claim', authenticate, async (req, res) => {
+  try {
+    const notificationId = req.params.id;
+    const userId = req.user.userId;
+
+    // Получаем уведомление
+    const { data: notification, error: notifError } = await supabase
+      .from('notifications')
+      .select('*')
+      .eq('id', notificationId)
+      .eq('user_id', userId)
+      .eq('claimed', false)
+      .single();
+    
+    if (notifError) throw notifError;
+    if (!notification) return res.status(404).json({ error: 'Notification not found' });
+    if (notification.type !== 'tournament_reward') {
+      return res.status(400).json({ error: 'Not a reward notification' });
+    }
+
+    const { coins, tickets, experience } = notification.data;
+    
+    // Получаем текущего пользователя
+    const { data: user, error: userError } = await supabase
+      .from('users')
+      .select('coins, tickets, experience, level, exp_points')
+      .eq('id', userId)
+      .single();
+    if (userError) throw userError;
+
+    const newCoins = user.coins + (coins || 0);
+    const newTickets = user.tickets + (tickets || 0);
+    const newExp = user.experience + (experience || 0);
+
+    const { level, currentExp, nextLevelExp } = calculateLevel(newExp);
+    let newExpPoints = user.exp_points;
+    if (level > user.level) newExpPoints += (level - user.level);
+
+    // Обновляем пользователя
+    await supabase.from('users').update({
+      coins: newCoins,
+      tickets: newTickets,
+      experience: newExp,
+      level: level,
+      exp_points: newExpPoints
+    }).eq('id', userId);
+
+    // Помечаем уведомление как прочитанное
+    await supabase.from('notifications').update({ claimed: true }).eq('id', notificationId);
+
+    // Возвращаем обновлённые данные
+    res.json({
+      success: true,
+      newCoins,
+      newTickets,
+      newExp,
+      level,
+      currentExp,
+      nextLevelExp,
+      expPoints: newExpPoints
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.post('/api/notifications/:id/claim-refund', authenticate, async (req, res) => {
   try {
     const notificationId = req.params.id;
