@@ -899,4 +899,171 @@ app.post('/api/pvp/start', authenticate, async (req, res) => {
   }
 });
 
+// ---------- СПОСОБНОСТИ ----------
+
+// Получение способностей для стиля
+app.get('/api/abilities/:style', authenticate, async (req, res) => {
+  try {
+    const { style } = req.params;
+    const userId = req.user.userId;
+    
+    if (!['striker', 'grappler'].includes(style)) {
+      return res.status(400).json({ error: 'Invalid style' });
+    }
+    
+    // Получаем способности
+    const { data: abilities, error: abilitiesError } = await supabase
+      .from('abilities')
+      .select('*')
+      .eq('style', style)
+      .order('row_position', { ascending: true })
+      .order('col_position', { ascending: true });
+      
+    if (abilitiesError) throw abilitiesError;
+    
+    // Получаем уровни для каждой способности
+    const abilityIds = abilities.map(a => a.id);
+    const { data: levels, error: levelsError } = await supabase
+      .from('ability_levels')
+      .select('*')
+      .in('ability_id', abilityIds)
+      .order('level', { ascending: true });
+      
+    if (levelsError) throw levelsError;
+    
+    // Группируем уровни по ability_id
+    const levelsByAbility = levels.reduce((acc, level) => {
+      if (!acc[level.ability_id]) acc[level.ability_id] = [];
+      acc[level.ability_id].push(level);
+      return acc;
+    }, {});
+    
+    // Добавляем уровни к способностям
+    const abilitiesWithLevels = abilities.map(ability => ({
+      ...ability,
+      levels: levelsByAbility[ability.id] || []
+    }));
+    
+    // Получаем изученные способности пользователя
+    const { data: userAbilities, error: userError } = await supabase
+      .from('user_abilities')
+      .select('ability_id, current_level')
+      .eq('user_id', userId);
+      
+    if (userError) throw userError;
+    
+    res.json({
+      abilities: abilitiesWithLevels,
+      userAbilities: userAbilities || []
+    });
+  } catch (err) {
+    console.error('Error loading abilities:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Изучение/улучшение способности
+app.post('/api/abilities/learn', authenticate, async (req, res) => {
+  try {
+    const { ability_id, level } = req.body;
+    const userId = req.user.userId;
+    
+    // Получаем информацию о способности
+    const { data: ability, error: abilityError } = await supabase
+      .from('abilities')
+      .select('*')
+      .eq('id', ability_id)
+      .single();
+      
+    if (abilityError) throw abilityError;
+    
+    // Получаем данные уровня
+    const { data: levelData, error: levelError } = await supabase
+      .from('ability_levels')
+      .select('*')
+      .eq('ability_id', ability_id)
+      .eq('level', level)
+      .single();
+      
+    if (levelError) throw levelError;
+    
+    // Проверяем уровень игрока
+    const { data: user, error: userError } = await supabase
+      .from('users')
+      .select('level, exp_points')
+      .eq('id', userId)
+      .single();
+      
+    if (userError) throw userError;
+    
+    if (user.level < ability.min_level) {
+      return res.status(400).json({ error: 'Player level too low' });
+    }
+    
+    // Проверяем родительскую способность
+    if (ability.parent_ability_id) {
+      const { data: parentAbility, error: parentError } = await supabase
+        .from('user_abilities')
+        .select('current_level')
+        .eq('user_id', userId)
+        .eq('ability_id', ability.parent_ability_id)
+        .single();
+        
+      if (parentError || !parentAbility || parentAbility.current_level === 0) {
+        return res.status(400).json({ error: 'Parent ability not learned' });
+      }
+    }
+    
+    // Проверяем EXP points
+    if (user.exp_points < levelData.cost) {
+      return res.status(400).json({ error: 'Not enough EXP points' });
+    }
+    
+    // Обновляем EXP points
+    const { error: updateError } = await supabase
+      .from('users')
+      .update({ exp_points: user.exp_points - levelData.cost })
+      .eq('id', userId);
+      
+    if (updateError) throw updateError;
+    
+    // Сохраняем/обновляем способность пользователя
+    const { data: existing, error: existingError } = await supabase
+      .from('user_abilities')
+      .select('id')
+      .eq('user_id', userId)
+      .eq('ability_id', ability_id)
+      .single();
+      
+    if (existingError && existingError.code !== 'PGRST116') throw existingError;
+    
+    if (existing) {
+      const { error: updateAbilityError } = await supabase
+        .from('user_abilities')
+        .update({ current_level: level, updated_at: new Date() })
+        .eq('id', existing.id);
+        
+      if (updateAbilityError) throw updateAbilityError;
+    } else {
+      const { error: insertError } = await supabase
+        .from('user_abilities')
+        .insert([{
+          user_id: userId,
+          ability_id: ability_id,
+          current_level: level
+        }]);
+        
+      if (insertError) throw insertError;
+    }
+    
+    res.json({ 
+      success: true, 
+      new_exp_points: user.exp_points - levelData.cost 
+    });
+  } catch (err) {
+    console.error('Error learning ability:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.listen(port, () => console.log(`Server running on port ${port}`));
