@@ -1,4 +1,4 @@
-// server.js – ПОЛНЫЙ ФАЙЛ с возвратом уровней в PvP
+// server.js – ПОЛНЫЙ ФАЙЛ с эндпоинтами для стиля
 require('dotenv').config();
 const express = require('express');
 const { createClient } = require('@supabase/supabase-js');
@@ -78,7 +78,8 @@ app.post('/api/auth/telegram', async (req, res) => {
         .from('users')
         .insert([{
           id: userId, username, photo_url: photoUrl, level: 1,
-          experience: 0, exp_points: 1, coins: 100, tickets: 0, ton: 0
+          experience: 0, exp_points: 1, coins: 100, tickets: 0, ton: 0,
+          style: null
         }])
         .select().single();
       if (insertError) throw insertError;
@@ -122,6 +123,53 @@ app.get('/api/user/profile', authenticate, async (req, res) => {
       currentExp,
       nextLevelExp
     });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ---------- СТИЛЬ ПОЛЬЗОВАТЕЛЯ ----------
+app.get('/api/user/style', authenticate, async (req, res) => {
+  try {
+    const { data: user, error } = await supabase
+      .from('users')
+      .select('style')
+      .eq('id', req.user.userId)
+      .single();
+    if (error) throw error;
+    res.json({ style: user.style });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/user/style', authenticate, async (req, res) => {
+  try {
+    const { style } = req.body;
+    if (!style || (style !== 'striker' && style !== 'grappler')) {
+      return res.status(400).json({ error: 'Invalid style' });
+    }
+    
+    const { data: user, error: userError } = await supabase
+      .from('users')
+      .select('style')
+      .eq('id', req.user.userId)
+      .single();
+    if (userError) throw userError;
+    
+    if (user.style) {
+      return res.status(400).json({ error: 'Style already chosen' });
+    }
+    
+    const { error: updateError } = await supabase
+      .from('users')
+      .update({ style })
+      .eq('id', req.user.userId);
+    if (updateError) throw updateError;
+    
+    res.json({ success: true, style });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message });
@@ -306,13 +354,11 @@ app.post('/api/notifications/claim-all', authenticate, async (req, res) => {
   }
 });
 
-// Начисление награды по конкретному уведомлению
 app.post('/api/notifications/:id/claim', authenticate, async (req, res) => {
   try {
     const notificationId = req.params.id;
     const userId = req.user.userId;
 
-    // Получаем уведомление
     const { data: notification, error: notifError } = await supabase
       .from('notifications')
       .select('*')
@@ -329,7 +375,6 @@ app.post('/api/notifications/:id/claim', authenticate, async (req, res) => {
 
     const { coins, tickets, experience } = notification.data;
     
-    // Получаем текущего пользователя
     const { data: user, error: userError } = await supabase
       .from('users')
       .select('coins, tickets, experience, level, exp_points')
@@ -345,7 +390,6 @@ app.post('/api/notifications/:id/claim', authenticate, async (req, res) => {
     let newExpPoints = user.exp_points;
     if (level > user.level) newExpPoints += (level - user.level);
 
-    // Обновляем пользователя
     await supabase.from('users').update({
       coins: newCoins,
       tickets: newTickets,
@@ -354,10 +398,8 @@ app.post('/api/notifications/:id/claim', authenticate, async (req, res) => {
       exp_points: newExpPoints
     }).eq('id', userId);
 
-    // Помечаем уведомление как прочитанное
     await supabase.from('notifications').update({ claimed: true }).eq('id', notificationId);
 
-    // Возвращаем обновлённые данные
     res.json({
       success: true,
       newCoins,
@@ -782,42 +824,42 @@ app.post('/api/pvp/start', authenticate, async (req, res) => {
     }
 
     const winnerId = result === 'win' ? userId : (result === 'loss' ? bestRival.user_id : null);
-let updatedWinner = null;
-if (winnerId) {
-  const { data: winner } = await supabase
-    .from('users')
-    .select('coins, experience, level, exp_points')
-    .eq('id', winnerId)
-    .single();
-  
-  const newExp = winner.experience + expReward;
-  const newCoins = winner.coins + coinsReward;
-  
-  const { level, currentExp, nextLevelExp } = calculateLevel(newExp);
-  let newExpPoints = winner.exp_points;
-  if (level > winner.level) {
-    newExpPoints += (level - winner.level);
-  }
-  
-  await supabase.from('users')
-    .update({
-      coins: newCoins,
-      experience: newExp,
-      level: level,
-      exp_points: newExpPoints
-    })
-    .eq('id', winnerId);
-  
-  updatedWinner = {
-    userId: winnerId,
-    coins: newCoins,
-    totalExp: newExp,
-    level,
-    currentExp,
-    nextLevelExp,
-    expPoints: newExpPoints
-  };
-}
+    let updatedWinner = null;
+    if (winnerId) {
+      const { data: winner } = await supabase
+        .from('users')
+        .select('coins, experience, level, exp_points')
+        .eq('id', winnerId)
+        .single();
+      
+      const newExp = winner.experience + expReward;
+      const newCoins = winner.coins + coinsReward;
+      
+      const { level, currentExp, nextLevelExp } = calculateLevel(newExp);
+      let newExpPoints = winner.exp_points;
+      if (level > winner.level) {
+        newExpPoints += (level - winner.level);
+      }
+      
+      await supabase.from('users')
+        .update({
+          coins: newCoins,
+          experience: newExp,
+          level: level,
+          exp_points: newExpPoints
+        })
+        .eq('id', winnerId);
+      
+      updatedWinner = {
+        userId: winnerId,
+        coins: newCoins,
+        totalExp: newExp,
+        level,
+        currentExp,
+        nextLevelExp,
+        expPoints: newExpPoints
+      };
+    }
 
     await supabase.from('pvp_battles').insert({
       user_id: userId,
@@ -849,7 +891,7 @@ if (winnerId) {
         coins: updatedUser.coins,
         tickets: updatedUser.tickets
       },
-      updatedWinner: updatedWinner // ← содержит новый опыт и уровень победителя
+      updatedWinner: updatedWinner
     });
   } catch (err) {
     console.error('❌ PvP error:', err);
