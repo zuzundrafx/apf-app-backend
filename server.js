@@ -1,4 +1,4 @@
-// server.js – ПОЛНЫЙ ФАЙЛ с эндпоинтами для стиля
+// server.js – ПОЛНЫЙ ФАЙЛ с интеграцией PASSIVE способностей в PvP
 require('dotenv').config();
 const express = require('express');
 const { createClient } = require('@supabase/supabase-js');
@@ -623,11 +623,105 @@ app.post('/api/tournaments/sync', async (req, res) => {
   }
 });
 
+// ---------- ФУНКЦИЯ ПРИМЕНЕНИЯ PASSIVE СПОСОБНОСТЕЙ ----------
+function applyPassiveAbilities(cards, userAbilities) {
+  if (!userAbilities || userAbilities.length === 0) {
+    return { cards, healthBonus: 0 };
+  }
+  
+  let healthBonus = 0;
+  
+  // Собираем бонусы от всех PASSIVE способностей
+  const bonuses = {
+    strikerDamageBonus: 0,
+    headDamageBonus: 0,
+    grapplerDamageBonus: 0,
+    healthBonus: 0
+  };
+  
+  userAbilities.forEach(ability => {
+    if (ability.type === 'passive' && ability.level_data) {
+      const data = ability.level_data;
+      
+      if (data.striker_damage_bonus) {
+        bonuses.strikerDamageBonus += data.striker_damage_bonus;
+      }
+      if (data.head_damage_bonus) {
+        bonuses.headDamageBonus += data.head_damage_bonus;
+      }
+      if (data.grappler_damage_bonus) {
+        bonuses.grapplerDamageBonus += data.grappler_damage_bonus;
+      }
+      if (data.health_bonus) {
+        bonuses.healthBonus += data.health_bonus;
+      }
+    }
+  });
+  
+  console.log('🔧 Applying bonuses:', bonuses);
+  
+  // Применяем бонусы к кардам
+  const modifiedCards = cards.map(selection => {
+    const fighter = { ...selection.fighter };
+    
+    // Определяем стиль бойца
+    const str = Number(fighter.Str) || 0;
+    const td = Number(fighter.Td) || 0;
+    const sub = Number(fighter.Sub) || 0;
+    const isStriker = str >= 50 && (td + sub) < 2;
+    const isGrappler = (td + sub) >= 2 && str < 50;
+    
+    let totalDamage = fighter['Total Damage'] || 0;
+    
+    // Применяем бонусы
+    if (isStriker && bonuses.strikerDamageBonus > 0) {
+      const multiplier = 1 + (bonuses.strikerDamageBonus / 100);
+      totalDamage = Math.round(totalDamage * multiplier);
+      console.log(`  ✅ ${fighter.Fighter} (Striker): +${bonuses.strikerDamageBonus}% damage = ${totalDamage}`);
+    }
+    
+    if (isGrappler && bonuses.grapplerDamageBonus > 0) {
+      const multiplier = 1 + (bonuses.grapplerDamageBonus / 100);
+      totalDamage = Math.round(totalDamage * multiplier);
+      console.log(`  ✅ ${fighter.Fighter} (Grappler): +${bonuses.grapplerDamageBonus}% damage = ${totalDamage}`);
+    }
+    
+    // Head damage bonus (применяется ко всем бойцам)
+    let headDamage = Math.round(totalDamage * 0.6);
+    if (bonuses.headDamageBonus > 0) {
+      const headMultiplier = 1 + (bonuses.headDamageBonus / 100);
+      headDamage = Math.round(headDamage * headMultiplier);
+    }
+    
+    return {
+      ...selection,
+      fighter: {
+        ...fighter,
+        'Total Damage': totalDamage,
+        'Head': headDamage,
+        'Body': Math.round(totalDamage * 0.3),
+        'Leg': Math.round(totalDamage * 0.1)
+      }
+    };
+  });
+  
+  healthBonus = bonuses.healthBonus;
+  
+  return { cards: modifiedCards, healthBonus };
+}
+
 // ---------- ФУНКЦИЯ ГЕНЕРАЦИИ СЦЕНАРИЯ БОЯ ----------
-function calculateBattleScript(userCards, rivalCards, allTournamentWeightClasses) {
+function calculateBattleScript(userCards, rivalCards, allTournamentWeightClasses, userHealthBonus = 0, rivalHealthBonus = 0) {
   const events = [];
-  let currentUserHealth = 1000;
-  let currentRivalHealth = 1000;
+  
+  // Базовое здоровье с бонусами
+  const baseHealth = 1000;
+  let currentUserHealth = baseHealth + Math.round(baseHealth * (userHealthBonus / 100));
+  let currentRivalHealth = baseHealth + Math.round(baseHealth * (rivalHealthBonus / 100));
+  
+  console.log(`❤️ User health: ${currentUserHealth} (base: ${baseHealth}, bonus: ${userHealthBonus}%)`);
+  console.log(`❤️ Rival health: ${currentRivalHealth} (base: ${baseHealth}, bonus: ${rivalHealthBonus}%)`);
+  
   let currentUserCards = [];
   let currentRivalCards = [];
   let availableClasses = [...allTournamentWeightClasses];
@@ -720,6 +814,7 @@ app.post('/api/pvp/start', authenticate, async (req, res) => {
 
     console.log(`🎮 PvP start: userId=${userId}, tournamentId=${tournamentId}, betAmount=${betAmount}`);
 
+    // 1. Получаем ставку пользователя
     const { data: userBet, error: betError } = await supabase
       .from('bets')
       .select('total_damage, selections')
@@ -732,6 +827,7 @@ app.post('/api/pvp/start', authenticate, async (req, res) => {
       return res.status(400).json({ error: 'No valid bet found for this tournament' });
     }
 
+    // 2. Проверяем баланс
     const { data: user, error: userError } = await supabase
       .from('users')
       .select('coins, tickets')
@@ -742,10 +838,51 @@ app.post('/api/pvp/start', authenticate, async (req, res) => {
       return res.status(400).json({ error: 'Not enough coins or tickets' });
     }
 
+    // 3. Списываем валюту
     await supabase.from('users')
       .update({ coins: user.coins - betAmount, tickets: user.tickets - 1 })
       .eq('id', userId);
 
+    // 4. Получаем способности пользователя
+    const { data: userAbilitiesData, error: userAbilitiesError } = await supabase
+      .from('user_abilities')
+      .select(`
+        ability_id,
+        current_level,
+        abilities!inner (
+          id,
+          name,
+          style,
+          type,
+          max_level
+        )
+      `)
+      .eq('user_id', userId)
+      .gt('current_level', 0);
+      
+    if (userAbilitiesError) {
+      console.error('Error loading user abilities:', userAbilitiesError);
+    }
+    
+    // Получаем уровни способностей
+    let userAbilities = [];
+    if (userAbilitiesData && userAbilitiesData.length > 0) {
+      const abilityIds = userAbilitiesData.map(ua => ua.ability_id);
+      const { data: levels } = await supabase
+        .from('ability_levels')
+        .select('*')
+        .in('ability_id', abilityIds);
+      
+      userAbilities = userAbilitiesData.map(ua => ({
+        ...ua.abilities,
+        current_level: ua.current_level,
+        level_data: levels?.find(l => l.ability_id === ua.ability_id && l.level === ua.current_level) || null
+      }));
+    }
+    
+    console.log(`🎯 User abilities: ${userAbilities.length}`);
+
+    // 5. Получаем весовые категории турнира
     const { data: tournamentFighters, error: fightersError } = await supabase
       .from('fighters')
       .select('weight_class')
@@ -753,8 +890,9 @@ app.post('/api/pvp/start', authenticate, async (req, res) => {
     if (fightersError) throw fightersError;
     
     const allWeightClasses = [...new Set(tournamentFighters.map(f => f.weight_class))];
-    console.log(`📊 Weight classes for tournament ${tournamentId}:`, allWeightClasses);
+    console.log(`📊 Weight classes:`, allWeightClasses);
 
+    // 6. Ищем соперника
     const { data: rivals, error: rivalError } = await supabase
       .from('bets')
       .select('user_id, total_damage, selections')
@@ -770,6 +908,7 @@ app.post('/api/pvp/start', authenticate, async (req, res) => {
       return res.status(400).json({ error: 'No opponents available' });
     }
 
+    // Выбираем ближайшего по урону соперника
     const userDamage = userBet.total_damage;
     let bestRival = rivals[0];
     let minDiff = Math.abs(userDamage - bestRival.total_damage);
@@ -781,17 +920,67 @@ app.post('/api/pvp/start', authenticate, async (req, res) => {
       }
     }
 
+    // 7. Получаем профиль и способности соперника
     const { data: rivalProfile } = await supabase
       .from('users')
       .select('username, photo_url')
       .eq('id', bestRival.user_id)
       .single();
 
+    // Получаем способности соперника
+    const { data: rivalAbilitiesData } = await supabase
+      .from('user_abilities')
+      .select(`
+        ability_id,
+        current_level,
+        abilities!inner (
+          id,
+          name,
+          style,
+          type,
+          max_level
+        )
+      `)
+      .eq('user_id', bestRival.user_id)
+      .gt('current_level', 0);
+    
+    let rivalAbilities = [];
+    if (rivalAbilitiesData && rivalAbilitiesData.length > 0) {
+      const abilityIds = rivalAbilitiesData.map(ua => ua.ability_id);
+      const { data: levels } = await supabase
+        .from('ability_levels')
+        .select('*')
+        .in('ability_id', abilityIds);
+      
+      rivalAbilities = rivalAbilitiesData.map(ua => ({
+        ...ua.abilities,
+        current_level: ua.current_level,
+        level_data: levels?.find(l => l.ability_id === ua.ability_id && l.level === ua.current_level) || null
+      }));
+    }
+
+    // 8. Применяем PASSIVE способности к кардам
     const userCards = userBet.selections;
     const rivalCards = bestRival.selections;
+    
+    const { cards: enhancedUserCards, healthBonus: userHealthBonus } = 
+      applyPassiveAbilities(userCards, userAbilities);
+    const { cards: enhancedRivalCards, healthBonus: rivalHealthBonus } = 
+      applyPassiveAbilities(rivalCards, rivalAbilities);
 
-    const { events: battleEvents, winningRound } = calculateBattleScript(userCards, rivalCards, allWeightClasses);
+    console.log(`💪 User health bonus: +${userHealthBonus}%`);
+    console.log(`💪 Rival health bonus: +${rivalHealthBonus}%`);
 
+    // 9. Генерируем сценарий боя с учётом бонусов
+    const { events: battleEvents, winningRound } = calculateBattleScript(
+      enhancedUserCards, 
+      enhancedRivalCards, 
+      allWeightClasses,
+      userHealthBonus,
+      rivalHealthBonus
+    );
+
+    // 10. Рассчитываем результаты
     const lastEvent = battleEvents[battleEvents.length - 1];
     const { result, resultType } = lastEvent.result;
 
@@ -810,7 +999,7 @@ app.post('/api/pvp/start', authenticate, async (req, res) => {
       winCoefficient = baseCoeff + roundsNotFought * 0.1;
     }
 
-    console.log(`🏆 Result: ${result} ${resultType || ''}, winningRound: ${winningRound}, winCoefficient: ${winCoefficient}`);
+    console.log(`🏆 Result: ${result} ${resultType || ''}, round: ${winningRound}, coeff: ${winCoefficient}`);
 
     let coinsReward = 0, expReward = 0;
     if (result === 'win') {
@@ -823,6 +1012,7 @@ app.post('/api/pvp/start', authenticate, async (req, res) => {
       expReward = 4;
     }
 
+    // 11. Обновляем победителя
     const winnerId = result === 'win' ? userId : (result === 'loss' ? bestRival.user_id : null);
     let updatedWinner = null;
     if (winnerId) {
@@ -861,6 +1051,7 @@ app.post('/api/pvp/start', authenticate, async (req, res) => {
       };
     }
 
+    // 12. Сохраняем историю боя
     await supabase.from('pvp_battles').insert({
       user_id: userId,
       rival_id: bestRival.user_id,
@@ -868,8 +1059,8 @@ app.post('/api/pvp/start', authenticate, async (req, res) => {
       bet_amount: betAmount,
       result: result,
       winner_id: winnerId,
-      user_total_damage: userCards.reduce((s, c) => s + c.fighter['Total Damage'], 0),
-      rival_total_damage: rivalCards.reduce((s, c) => s + c.fighter['Total Damage'], 0)
+      user_total_damage: enhancedUserCards.reduce((s, c) => s + c.fighter['Total Damage'], 0),
+      rival_total_damage: enhancedRivalCards.reduce((s, c) => s + c.fighter['Total Damage'], 0)
     });
 
     const { data: updatedUser } = await supabase
