@@ -1,4 +1,4 @@
-// server.js – ПОЛНЫЙ ФАЙЛ с детальным логированием бонусов
+// server.js – ПОЛНЫЙ ФАЙЛ с пересчётом урона и бонусами (на основе вашей версии)
 require('dotenv').config();
 const express = require('express');
 const { createClient } = require('@supabase/supabase-js');
@@ -40,6 +40,17 @@ const safeNumber = (val) => {
   const num = Number(val);
   return isNaN(num) ? 0 : num;
 };
+
+// Коэффициенты урона (как в парсере)
+const KD_COEF = 25.0;
+const TD_COEF = 10.0;
+const SUB_COEF = 15.0;
+const HEAD_COEF = 1.0;
+const BODY_COEF = 0.9;
+const LEG_COEF = 0.8;
+const WIN_COEF = 1.0;
+const LOSE_COEF = 0.7;
+const DRAW_COEF = 0.9;
 
 const LEVEL_THRESHOLDS = [5, 10, 15, 20, 25, 30, 35, 40, 45, 0];
 
@@ -523,7 +534,11 @@ app.post('/api/tournaments/sync', async (req, res) => {
         time: f.Time || '',
         str: safeNumber(f.Str),
         td: safeNumber(f.Td),
-        sub: safeNumber(f.Sub)
+        sub: safeNumber(f.Sub),
+        head: safeNumber(f.Head),
+        body: safeNumber(f.Body),
+        leg: safeNumber(f.Leg),
+        kd: safeNumber(f.Kd)
       };
 
       if (existing) {
@@ -623,8 +638,61 @@ app.post('/api/tournaments/sync', async (req, res) => {
   }
 });
 
+// ---------- ФУНКЦИЯ ОПРЕДЕЛЕНИЯ СТИЛЯ БОЙЦА ----------
+function getFighterStyle(str, td, sub) {
+  const tdSubSum = td + sub;
+  if (tdSubSum >= 2 && str < 50) return 'grappler';
+  if (str >= 50 && tdSubSum < 2) return 'striker';
+  if (str >= 50 && tdSubSum >= 2) return 'universal';
+  return 'simple';
+}
+
+// ---------- ФУНКЦИЯ РАСЧЁТА БАЗОВОГО УРОНА ----------
+function calculateBaseDamage(fighterData, customHeadCoef = null, customBodyCoef = null, customLegCoef = null) {
+  const kd = safeNumber(fighterData.Kd);
+  const td = safeNumber(fighterData.Td);
+  const sub = safeNumber(fighterData.Sub);
+  const head = safeNumber(fighterData.Head);
+  const body = safeNumber(fighterData.Body);
+  const leg = safeNumber(fighterData.Leg);
+  const wl = fighterData['W/L'] || 'lose';
+  const method = (fighterData.Method || '').toUpperCase();
+  
+  // Бонусы за способ завершения
+  let kdBonus = 0;
+  let subBonus = 0;
+  
+  if (wl === 'win') {
+    if (method.includes('KO') || method.includes('TKO')) {
+      kdBonus = 65 - KD_COEF;
+    } else if (method.includes('SUB')) {
+      subBonus = 50 - SUB_COEF;
+    }
+  }
+  
+  // Коэффициент результата
+  let wkCoef = LOSE_COEF;
+  if (wl === 'win') wkCoef = WIN_COEF;
+  else if (wl === 'draw') wkCoef = DRAW_COEF;
+  
+  const headCoef = customHeadCoef !== null ? customHeadCoef : HEAD_COEF;
+  const bodyCoef = customBodyCoef !== null ? customBodyCoef : BODY_COEF;
+  const legCoef = customLegCoef !== null ? customLegCoef : LEG_COEF;
+  
+  const total = (
+    kd * KD_COEF + kdBonus +
+    td * TD_COEF +
+    sub * SUB_COEF + subBonus +
+    head * headCoef +
+    body * bodyCoef +
+    leg * legCoef
+  ) * wkCoef * (safeNumber(fighterData['Weight Coefficient']) || 1.0);
+  
+  return Math.round(total);
+}
+
 // ---------- ФУНКЦИЯ ПРИМЕНЕНИЯ PASSIVE СПОСОБНОСТЕЙ ----------
-function applyPassiveAbilities(cards, userAbilities) {
+function applyPassiveAbilities(cards, userAbilities, fightersData) {
   if (!userAbilities || userAbilities.length === 0) {
     console.log('⚠️ No abilities to apply');
     return { cards, healthBonus: 0 };
@@ -677,41 +745,53 @@ function applyPassiveAbilities(cards, userAbilities) {
     const fighter = { ...selection.fighter };
     
     // Определяем стиль бойца
-    const str = Number(fighter.Str) || 0;
-    const td = Number(fighter.Td) || 0;
-    const sub = Number(fighter.Sub) || 0;
-    const isStriker = str >= 50 && (td + sub) < 2;
-    const isGrappler = (td + sub) >= 2 && str < 50;
+    const str = safeNumber(fighter.Str);
+    const td = safeNumber(fighter.Td);
+    const sub = safeNumber(fighter.Sub);
+    const fighterStyle = getFighterStyle(str, td, sub);
     
-    let totalDamage = fighter['Total Damage'] || 0;
+    // Находим полные данные бойца из БД
+    const fullFighterData = fightersData?.find(f => f.fighter_name === fighter.Fighter) || fighter;
     
-    console.log(`🔎 Fighter ${fighter.Fighter}: Str=${str}, Td=${td}, Sub=${sub}, isStriker=${isStriker}, isGrappler=${isGrappler}, baseDamage=${totalDamage}`);
+    // Рассчитываем базовый урон
+    const baseTotalDamage = calculateBaseDamage(fullFighterData);
     
-    if (isStriker && bonuses.strikerDamageBonus > 0) {
-      const oldDamage = totalDamage;
-      const multiplier = 1 + (bonuses.strikerDamageBonus / 100);
-      totalDamage = Math.round(totalDamage * multiplier);
-      console.log(`  ✅ Striker: ${oldDamage} * ${multiplier} = ${totalDamage} (+${bonuses.strikerDamageBonus}%)`);
-    }
+    // Модифицируем коэффициенты с учётом бонусов
+    let customHeadCoef = null;
     
-    if (isGrappler && bonuses.grapplerDamageBonus > 0) {
-      const oldDamage = totalDamage;
-      const multiplier = 1 + (bonuses.grapplerDamageBonus / 100);
-      totalDamage = Math.round(totalDamage * multiplier);
-      console.log(`  ✅ Grappler: ${oldDamage} * ${multiplier} = ${totalDamage} (+${bonuses.grapplerDamageBonus}%)`);
-    }
-    
-    // Если не удалось определить стиль
-    if (!isStriker && !isGrappler && (bonuses.strikerDamageBonus > 0 || bonuses.grapplerDamageBonus > 0)) {
-      console.log(`  ⚠️ Unknown style for ${fighter.Fighter}, applying no damage bonus`);
-    }
-    
-    // Head damage bonus (применяется ко всем бойцам)
-    let headDamage = Math.round(totalDamage * 0.6);
     if (bonuses.headDamageBonus > 0) {
-      const headMultiplier = 1 + (bonuses.headDamageBonus / 100);
-      headDamage = Math.round(headDamage * headMultiplier);
+      customHeadCoef = HEAD_COEF * (1 + bonuses.headDamageBonus / 100);
+      console.log(`  ✅ Head coefficient: ${HEAD_COEF} -> ${customHeadCoef.toFixed(2)} (+${bonuses.headDamageBonus}%)`);
     }
+    
+    // Пересчитываем урон с модифицированными коэффициентами
+    let totalDamage = calculateBaseDamage(fullFighterData, customHeadCoef);
+    
+    console.log(`🔎 Fighter ${fighter.Fighter}: Str=${str}, Td=${td}, Sub=${sub}, style=${fighterStyle}, baseDamage=${baseTotalDamage}, afterCoef=${totalDamage}`);
+    
+    // Применяем стилевые бонусы к ИТОГОВОМУ урону
+    if (fighterStyle === 'striker' && bonuses.strikerDamageBonus > 0) {
+      const oldDamage = totalDamage;
+      totalDamage = Math.round(totalDamage * (1 + bonuses.strikerDamageBonus / 100));
+      console.log(`  ✅ Striker bonus: ${oldDamage} -> ${totalDamage} (+${bonuses.strikerDamageBonus}%)`);
+    } else if (fighterStyle === 'grappler' && bonuses.grapplerDamageBonus > 0) {
+      const oldDamage = totalDamage;
+      totalDamage = Math.round(totalDamage * (1 + bonuses.grapplerDamageBonus / 100));
+      console.log(`  ✅ Grappler bonus: ${oldDamage} -> ${totalDamage} (+${bonuses.grapplerDamageBonus}%)`);
+    } else if (fighterStyle === 'universal' && (bonuses.strikerDamageBonus > 0 || bonuses.grapplerDamageBonus > 0)) {
+      const halfStriker = (bonuses.strikerDamageBonus || 0) / 2;
+      const halfGrappler = (bonuses.grapplerDamageBonus || 0) / 2;
+      const totalBonus = halfStriker + halfGrappler;
+      const oldDamage = totalDamage;
+      totalDamage = Math.round(totalDamage * (1 + totalBonus / 100));
+      console.log(`  ✅ Universal bonus: ${oldDamage} -> ${totalDamage} (+${totalBonus}%)`);
+    } else {
+      console.log(`  ℹ️ Style: ${fighterStyle} — no style-specific damage bonus`);
+    }
+    
+    const headDamage = safeNumber(fullFighterData.Head);
+    const bodyDamage = safeNumber(fullFighterData.Body);
+    const legDamage = safeNumber(fullFighterData.Leg);
     
     return {
       ...selection,
@@ -719,8 +799,8 @@ function applyPassiveAbilities(cards, userAbilities) {
         ...fighter,
         'Total Damage': totalDamage,
         'Head': headDamage,
-        'Body': Math.round(totalDamage * 0.3),
-        'Leg': Math.round(totalDamage * 0.1)
+        'Body': bodyDamage,
+        'Leg': legDamage
       }
     };
   });
@@ -989,9 +1069,18 @@ app.post('/api/pvp/start', authenticate, async (req, res) => {
       console.log(`  - ${ua.name} (${ua.type}) level ${ua.current_level}/${ua.max_level}:`, ua.level_data);
     });
 
-    // 8. Применяем PASSIVE способности к кардам
+    // 8. Загружаем полные данные бойцов из БД
     const userCards = userBet.selections;
     const rivalCards = bestRival.selections;
+    
+    const allFighterNames = [...userCards.map(c => c.fighter.Fighter), ...rivalCards.map(c => c.fighter.Fighter)];
+    const { data: fightersData } = await supabase
+      .from('fighters')
+      .select('*')
+      .in('fighter_name', allFighterNames)
+      .eq('tournament_id', tournamentId);
+
+    console.log(`📊 Loaded ${fightersData?.length || 0} fighters data for damage calculation`);
     
     console.log('📊 USER CARDS BEFORE BONUSES:');
     userCards.forEach(c => console.log(`  ${c.fighter.Fighter}: damage=${c.fighter['Total Damage']}, Str=${c.fighter.Str}, Td=${c.fighter.Td}, Sub=${c.fighter.Sub}`));
@@ -1000,9 +1089,9 @@ app.post('/api/pvp/start', authenticate, async (req, res) => {
     rivalCards.forEach(c => console.log(`  ${c.fighter.Fighter}: damage=${c.fighter['Total Damage']}, Str=${c.fighter.Str}, Td=${c.fighter.Td}, Sub=${c.fighter.Sub}`));
     
     const { cards: enhancedUserCards, healthBonus: userHealthBonus } = 
-      applyPassiveAbilities(userCards, userAbilities);
+      applyPassiveAbilities(userCards, userAbilities, fightersData);
     const { cards: enhancedRivalCards, healthBonus: rivalHealthBonus } = 
-      applyPassiveAbilities(rivalCards, rivalAbilities);
+      applyPassiveAbilities(rivalCards, rivalAbilities, fightersData);
 
     console.log(`💪 User health bonus: +${userHealthBonus}%`);
     console.log(`💪 Rival health bonus: +${rivalHealthBonus}%`);
