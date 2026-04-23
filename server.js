@@ -1,4 +1,4 @@
-// server.js – ПОЛНЫЙ ФАЙЛ с интеграцией PASSIVE способностей в PvP
+// server.js – ПОЛНЫЙ ФАЙЛ с детальным логированием бонусов
 require('dotenv').config();
 const express = require('express');
 const { createClient } = require('@supabase/supabase-js');
@@ -626,6 +626,7 @@ app.post('/api/tournaments/sync', async (req, res) => {
 // ---------- ФУНКЦИЯ ПРИМЕНЕНИЯ PASSIVE СПОСОБНОСТЕЙ ----------
 function applyPassiveAbilities(cards, userAbilities) {
   if (!userAbilities || userAbilities.length === 0) {
+    console.log('⚠️ No abilities to apply');
     return { cards, healthBonus: 0 };
   }
   
@@ -639,26 +640,37 @@ function applyPassiveAbilities(cards, userAbilities) {
     healthBonus: 0
   };
   
+  console.log('🔧 Collecting bonuses from abilities:');
   userAbilities.forEach(ability => {
     if (ability.type === 'passive' && ability.level_data) {
       const data = ability.level_data;
+      console.log(`  📋 ${ability.name} (level ${ability.current_level}):`, {
+        striker_damage_bonus: data.striker_damage_bonus,
+        head_damage_bonus: data.head_damage_bonus,
+        grappler_damage_bonus: data.grappler_damage_bonus,
+        health_bonus: data.health_bonus
+      });
       
       if (data.striker_damage_bonus) {
         bonuses.strikerDamageBonus += data.striker_damage_bonus;
+        console.log(`    ✅ strikerDamageBonus +${data.striker_damage_bonus}% = ${bonuses.strikerDamageBonus}%`);
       }
       if (data.head_damage_bonus) {
         bonuses.headDamageBonus += data.head_damage_bonus;
+        console.log(`    ✅ headDamageBonus +${data.head_damage_bonus}% = ${bonuses.headDamageBonus}%`);
       }
       if (data.grappler_damage_bonus) {
         bonuses.grapplerDamageBonus += data.grappler_damage_bonus;
+        console.log(`    ✅ grapplerDamageBonus +${data.grappler_damage_bonus}% = ${bonuses.grapplerDamageBonus}%`);
       }
       if (data.health_bonus) {
         bonuses.healthBonus += data.health_bonus;
+        console.log(`    ✅ healthBonus +${data.health_bonus}% = ${bonuses.healthBonus}%`);
       }
     }
   });
   
-  console.log('🔧 Applying bonuses:', bonuses);
+  console.log('📦 Total bonuses collected:', bonuses);
   
   // Применяем бонусы к кардам
   const modifiedCards = cards.map(selection => {
@@ -673,17 +685,25 @@ function applyPassiveAbilities(cards, userAbilities) {
     
     let totalDamage = fighter['Total Damage'] || 0;
     
-    // Применяем бонусы
+    console.log(`🔎 Fighter ${fighter.Fighter}: Str=${str}, Td=${td}, Sub=${sub}, isStriker=${isStriker}, isGrappler=${isGrappler}, baseDamage=${totalDamage}`);
+    
     if (isStriker && bonuses.strikerDamageBonus > 0) {
+      const oldDamage = totalDamage;
       const multiplier = 1 + (bonuses.strikerDamageBonus / 100);
       totalDamage = Math.round(totalDamage * multiplier);
-      console.log(`  ✅ ${fighter.Fighter} (Striker): +${bonuses.strikerDamageBonus}% damage = ${totalDamage}`);
+      console.log(`  ✅ Striker: ${oldDamage} * ${multiplier} = ${totalDamage} (+${bonuses.strikerDamageBonus}%)`);
     }
     
     if (isGrappler && bonuses.grapplerDamageBonus > 0) {
+      const oldDamage = totalDamage;
       const multiplier = 1 + (bonuses.grapplerDamageBonus / 100);
       totalDamage = Math.round(totalDamage * multiplier);
-      console.log(`  ✅ ${fighter.Fighter} (Grappler): +${bonuses.grapplerDamageBonus}% damage = ${totalDamage}`);
+      console.log(`  ✅ Grappler: ${oldDamage} * ${multiplier} = ${totalDamage} (+${bonuses.grapplerDamageBonus}%)`);
+    }
+    
+    // Если не удалось определить стиль
+    if (!isStriker && !isGrappler && (bonuses.strikerDamageBonus > 0 || bonuses.grapplerDamageBonus > 0)) {
+      console.log(`  ⚠️ Unknown style for ${fighter.Fighter}, applying no damage bonus`);
     }
     
     // Head damage bonus (применяется ко всем бойцам)
@@ -881,6 +901,10 @@ app.post('/api/pvp/start', authenticate, async (req, res) => {
     }
     
     console.log(`🎯 User abilities: ${userAbilities.length}`);
+    console.log('🔍 USER ABILITIES DETAIL:');
+    userAbilities.forEach(ua => {
+      console.log(`  - ${ua.name} (${ua.type}) level ${ua.current_level}/${ua.max_level}:`, ua.level_data);
+    });
 
     // 5. Получаем весовые категории турнира
     const { data: tournamentFighters, error: fightersError } = await supabase
@@ -958,10 +982,22 @@ app.post('/api/pvp/start', authenticate, async (req, res) => {
         level_data: levels?.find(l => l.ability_id === ua.ability_id && l.level === ua.current_level) || null
       }));
     }
+    
+    console.log(`🎯 Rival abilities: ${rivalAbilities.length}`);
+    console.log('🔍 RIVAL ABILITIES DETAIL:');
+    rivalAbilities.forEach(ua => {
+      console.log(`  - ${ua.name} (${ua.type}) level ${ua.current_level}/${ua.max_level}:`, ua.level_data);
+    });
 
     // 8. Применяем PASSIVE способности к кардам
     const userCards = userBet.selections;
     const rivalCards = bestRival.selections;
+    
+    console.log('📊 USER CARDS BEFORE BONUSES:');
+    userCards.forEach(c => console.log(`  ${c.fighter.Fighter}: damage=${c.fighter['Total Damage']}, Str=${c.fighter.Str}, Td=${c.fighter.Td}, Sub=${c.fighter.Sub}`));
+    
+    console.log('📊 RIVAL CARDS BEFORE BONUSES:');
+    rivalCards.forEach(c => console.log(`  ${c.fighter.Fighter}: damage=${c.fighter['Total Damage']}, Str=${c.fighter.Str}, Td=${c.fighter.Td}, Sub=${c.fighter.Sub}`));
     
     const { cards: enhancedUserCards, healthBonus: userHealthBonus } = 
       applyPassiveAbilities(userCards, userAbilities);
@@ -970,6 +1006,12 @@ app.post('/api/pvp/start', authenticate, async (req, res) => {
 
     console.log(`💪 User health bonus: +${userHealthBonus}%`);
     console.log(`💪 Rival health bonus: +${rivalHealthBonus}%`);
+    
+    console.log('📊 USER CARDS AFTER BONUSES:');
+    enhancedUserCards.forEach(c => console.log(`  ${c.fighter.Fighter}: damage=${c.fighter['Total Damage']}`));
+    
+    console.log('📊 RIVAL CARDS AFTER BONUSES:');
+    enhancedRivalCards.forEach(c => console.log(`  ${c.fighter.Fighter}: damage=${c.fighter['Total Damage']}`));
 
     // 9. Генерируем сценарий боя с учётом бонусов
     const { events: battleEvents, winningRound } = calculateBattleScript(
@@ -1076,13 +1118,12 @@ app.post('/api/pvp/start', authenticate, async (req, res) => {
       rival: {
         username: rivalProfile?.username || 'Opponent',
         photoUrl: rivalProfile?.photo_url,
-        selections: rivalCards  // ← возвращаем ОРИГИНАЛЬНЫЕ карты (без бонусов)
-  },
-  // ДОБАВЛЯЕМ бонусы здоровья:
-  healthBonuses: {
-    user: userHealthBonus,
-    rival: rivalHealthBonus
-  },
+        selections: rivalCards
+      },
+      healthBonuses: {
+        user: userHealthBonus,
+        rival: rivalHealthBonus
+      },
       updatedBalance: {
         coins: updatedUser.coins,
         tickets: updatedUser.tickets
