@@ -1076,8 +1076,13 @@ app.post('/api/pvp/start', authenticate, async (req, res) => {
       rival: {
         username: rivalProfile?.username || 'Opponent',
         photoUrl: rivalProfile?.photo_url,
-        selections: rivalCards
-      },
+        selections: rivalCards  // ← возвращаем ОРИГИНАЛЬНЫЕ карты (без бонусов)
+  },
+  // ДОБАВЛЯЕМ бонусы здоровья:
+  healthBonuses: {
+    user: userHealthBonus,
+    rival: rivalHealthBonus
+  },
       updatedBalance: {
         coins: updatedUser.coins,
         tickets: updatedUser.tickets
