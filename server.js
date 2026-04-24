@@ -493,6 +493,15 @@ app.post('/api/tournaments/sync', async (req, res) => {
     const { tournament, fighters, is_completed } = req.body;
     console.log(`📥 Sync request for "${tournament.name}", fighters: ${fighters?.length || 0}, completed: ${is_completed}`);
 
+    if (fighters && fighters.length > 0) {
+  console.log('📋 Sample fighter data from parser:');
+  const sample = fighters[0];
+  console.log(`  Fighter: ${sample.Fighter}`);
+  console.log(`  Head: ${sample.Head}, Body: ${sample.Body}, Leg: ${sample.Leg}, Kd: ${sample.Kd}`);
+  console.log(`  Total Damage: ${sample['Total Damage']}`);
+  console.log('  Full keys:', Object.keys(sample).join(', '));
+}
+
     let { data: dbTournament, error: findError } = await supabase
       .from('tournaments').select('*').eq('name', tournament.name).single();
     if (findError && findError.code !== 'PGRST116') throw findError;
