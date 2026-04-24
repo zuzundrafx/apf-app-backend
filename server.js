@@ -658,12 +658,12 @@ function getFighterStyle(str, td, sub) {
 
 // ---------- ФУНКЦИЯ РАСЧЁТА БАЗОВОГО УРОНА ----------
 function calculateBaseDamage(fighterData, customHeadCoef = null, customBodyCoef = null, customLegCoef = null) {
-  const kd = safeNumber(fighterData.Kd);
-  const td = safeNumber(fighterData.Td);
-  const sub = safeNumber(fighterData.Sub);
-  const head = safeNumber(fighterData.Head);
-  const body = safeNumber(fighterData.Body);
-  const leg = safeNumber(fighterData.Leg);
+  const kd = safeNumber(fighterData.Kd || fighterData.kd);
+  const td = safeNumber(fighterData.Td || fighterData.td);
+  const sub = safeNumber(fighterData.Sub || fighterData.sub);
+  const head = safeNumber(fighterData.Head || fighterData.head);
+  const body = safeNumber(fighterData.Body || fighterData.body);
+  const leg = safeNumber(fighterData.Leg || fighterData.leg);
   const wl = fighterData['W/L'] || 'lose';
   const method = (fighterData.Method || '').toUpperCase();
   
@@ -800,9 +800,9 @@ function applyPassiveAbilities(cards, userAbilities, fightersData) {
       console.log(`  ℹ️ Style: ${fighterStyle} — no style-specific damage bonus`);
     }
     
-    const headDamage = safeNumber(fullFighterData.Head);
-    const bodyDamage = safeNumber(fullFighterData.Body);
-    const legDamage = safeNumber(fullFighterData.Leg);
+    const headDamage = safeNumber(fullFighterData.Head || fullFighterData.head);
+const bodyDamage = safeNumber(fullFighterData.Body || fullFighterData.body);
+const legDamage = safeNumber(fullFighterData.Leg || fullFighterData.leg);
     
 console.log(`  📤 Final ${fighter.Fighter}: Total=${totalDamage}, Head=${headDamage}, Body=${bodyDamage}, Leg=${legDamage}`);
 
