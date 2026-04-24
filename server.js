@@ -761,7 +761,9 @@ function applyPassiveAbilities(cards, userAbilities, fightersData) {
     
     // Находим полные данные бойца из БД
     const fullFighterData = fightersData?.find(f => f.fighter_name === fighter.Fighter) || fighter;
-    
+    if (!fullFighterData) {
+  console.log(`  ⚠️ Fighter ${fighter.Fighter} NOT FOUND in fightersData! Available: ${fightersData?.map(f => f.fighter_name).join(', ')}`);
+}
     // Рассчитываем базовый урон
     const baseTotalDamage = calculateBaseDamage(fullFighterData);
     
@@ -1095,6 +1097,11 @@ app.post('/api/pvp/start', authenticate, async (req, res) => {
       .eq('tournament_id', tournamentId);
 
     console.log(`📊 Loaded ${fightersData?.length || 0} fighters data for damage calculation`);
+    // ← СЮДА ДОБАВИТЬ ЛОГ:
+    console.log('📊 Loaded fighters data:');
+    if (fightersData) {
+      fightersData.forEach(f => console.log(`  ${f.fighter_name}: Head=${f.head}, Body=${f.body}, Leg=${f.leg}, Total=${f.total_damage}`));
+    }
     
     console.log('📊 USER CARDS BEFORE BONUSES:');
     userCards.forEach(c => console.log(`  ${c.fighter.Fighter}: damage=${c.fighter['Total Damage']}, Str=${c.fighter.Str}, Td=${c.fighter.Td}, Sub=${c.fighter.Sub}`));
