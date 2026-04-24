@@ -1,4 +1,4 @@
-// server.js – ПОЛНЫЙ ФАЙЛ с пересчётом урона и бонусами (на основе вашей версии)
+// server.js – ПОЛНЫЙ ФАЙЛ с загрузкой коэффициентов из БД и пересчётом урона
 require('dotenv').config();
 const express = require('express');
 const { createClient } = require('@supabase/supabase-js');
@@ -41,16 +41,64 @@ const safeNumber = (val) => {
   return isNaN(num) ? 0 : num;
 };
 
-// Коэффициенты урона (как в парсере)
-const KD_COEF = 25.0;
-const TD_COEF = 10.0;
-const SUB_COEF = 15.0;
-const HEAD_COEF = 1.0;
-const BODY_COEF = 0.9;
-const LEG_COEF = 0.8;
-const WIN_COEF = 1.0;
-const LOSE_COEF = 0.7;
-const DRAW_COEF = 0.9;
+// Глобальный кэш коэффициентов
+let COEFFICIENTS = {};
+
+async function loadCoefficients() {
+  try {
+    const { data, error } = await supabase
+      .from('base_coefficients')
+      .select('coef_key, coef_value');
+    
+    if (error) {
+      console.error('❌ Failed to load coefficients:', error);
+      return;
+    }
+    
+    COEFFICIENTS = {};
+    
+    data.forEach(row => {
+      COEFFICIENTS[row.coef_key] = parseFloat(row.coef_value);
+    });
+    
+    console.log(`✅ Loaded ${Object.keys(COEFFICIENTS).length} coefficients from DB`);
+  } catch (err) {
+    console.error('❌ Error loading coefficients:', err);
+  }
+}
+
+// Загружаем коэффициенты при старте
+loadCoefficients();
+
+// Периодически обновляем кэш (каждые 5 минут)
+setInterval(loadCoefficients, 5 * 60 * 1000);
+
+// API для получения коэффициентов
+app.get('/api/coefficients', async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('base_coefficients')
+      .select('*')
+      .order('coef_key');
+    
+    if (error) throw error;
+    res.json(data);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Вспомогательные функции для получения коэффициентов
+function getCoef(key) {
+  return COEFFICIENTS[key] !== undefined ? COEFFICIENTS[key] : 0;
+}
+
+function getWeightCoefficient(weightClass) {
+  if (!weightClass) return 1.0;
+  const key = `weight_${weightClass}`;
+  return getCoef(key) || 1.0;
+}
 
 const LEVEL_THRESHOLDS = [5, 10, 15, 20, 25, 30, 35, 40, 45, 0];
 
@@ -246,7 +294,21 @@ app.post('/api/bets', authenticate, async (req, res) => {
     await supabase.from('users')
       .update({ coins: user.coins - betAmount }).eq('id', userId);
 
-    const totalDamage = selections.reduce((sum, sel) => sum + (sel.fighter.TotalDamage || 0), 0);
+    // Рассчитываем Total Damage через серверную функцию
+    const totalDamage = selections.reduce((sum, sel) => {
+      const dmg = calculateBaseDamage({
+        Kd: sel.fighter.Kd || 0,
+        Td: sel.fighter.Td || 0,
+        Sub: sel.fighter.Sub || 0,
+        Head: sel.fighter.Head || 0,
+        Body: sel.fighter.Body || 0,
+        Leg: sel.fighter.Leg || 0,
+        'W/L': sel.fighter['W/L'] || 'lose',
+        Method: sel.fighter.Method || '',
+        weight_class: sel.weightClass
+      });
+      return sum + dmg;
+    }, 0);
 
     const { data: bet, error: betError } = await supabase
       .from('bets').insert([{
@@ -493,15 +555,6 @@ app.post('/api/tournaments/sync', async (req, res) => {
     const { tournament, fighters, is_completed } = req.body;
     console.log(`📥 Sync request for "${tournament.name}", fighters: ${fighters?.length || 0}, completed: ${is_completed}`);
 
-    if (fighters && fighters.length > 0) {
-  console.log('📋 Sample fighter data from parser:');
-  const sample = fighters[0];
-  console.log(`  Fighter: ${sample.Fighter}`);
-  console.log(`  Head: ${sample.Head}, Body: ${sample.Body}, Leg: ${sample.Leg}, Kd: ${sample.Kd}`);
-  console.log(`  Total Damage: ${sample['Total Damage']}`);
-  console.log('  Full keys:', Object.keys(sample).join(', '));
-}
-
     let { data: dbTournament, error: findError } = await supabase
       .from('tournaments').select('*').eq('name', tournament.name).single();
     if (findError && findError.code !== 'PGRST116') throw findError;
@@ -531,13 +584,26 @@ app.post('/api/tournaments/sync', async (req, res) => {
         .eq('fighter_name', f.Fighter)
         .maybeSingle();
 
+      // Рассчитываем Total Damage на сервере
+      const totalDamage = calculateBaseDamage({
+        Kd: f.Kd || 0,
+        Td: f.Td || 0,
+        Sub: f.Sub || 0,
+        Head: f.Head || 0,
+        Body: f.Body || 0,
+        Leg: f.Leg || 0,
+        'W/L': f['W/L'] || 'lose',
+        Method: f.Method || '',
+        weight_class: f['Weight class'] || ''
+      });
+
       const fighterData = {
         tournament_id: dbTournament.id,
         fighter_name: f.Fighter,
         weight_class: f['Weight class'],
         fight_id: safeNumber(f.Fight_ID),
         wl: f['W/L']?.toLowerCase() || null,
-        total_damage: Math.round(safeNumber(f['Total Damage'])),
+        total_damage: totalDamage,
         method: f.Method || '',
         round: safeNumber(f.Round),
         time: f.Time || '',
@@ -583,12 +649,24 @@ app.post('/api/tournaments/sync', async (req, res) => {
         for (const sel of selections) {
           const fighterData = fighters.find(f => f.Fighter === sel.fighter.Fighter);
           if (fighterData) {
+            const newTotalDamage = calculateBaseDamage({
+              Kd: fighterData.Kd || 0,
+              Td: fighterData.Td || 0,
+              Sub: fighterData.Sub || 0,
+              Head: fighterData.Head || 0,
+              Body: fighterData.Body || 0,
+              Leg: fighterData.Leg || 0,
+              'W/L': fighterData['W/L'] || 'lose',
+              Method: fighterData.Method || '',
+              weight_class: fighterData['Weight class'] || ''
+            });
+
             const enriched = {
               ...sel,
               fighter: {
                 ...sel.fighter,
                 'W/L': fighterData['W/L']?.toLowerCase(),
-                'Total Damage': Math.round(safeNumber(fighterData['Total Damage'])),
+                'Total Damage': newTotalDamage,
                 Method: fighterData.Method,
                 Round: fighterData.Round,
                 Time: fighterData.Time,
@@ -598,7 +676,7 @@ app.post('/api/tournaments/sync', async (req, res) => {
               }
             };
             updatedSelections.push(enriched);
-            totalDamage += Math.round(safeNumber(fighterData['Total Damage']));
+            totalDamage += newTotalDamage;
             if (fighterData['W/L']?.toLowerCase() === 'win') winners++;
           }
         }
@@ -647,6 +725,190 @@ app.post('/api/tournaments/sync', async (req, res) => {
   }
 });
 
+// Пересчёт урона по имени турнира (вызывается парсером)
+app.post('/api/tournaments/recalculate', async (req, res) => {
+  try {
+    const { tournament_name } = req.body;
+
+    if (!tournament_name) {
+      return res.status(400).json({ error: 'tournament_name is required' });
+    }
+
+    console.log(`🔄 Recalculate requested for: "${tournament_name}"`);
+
+    // Находим турнир по имени
+    const { data: tournament, error: findError } = await supabase
+      .from('tournaments')
+      .select('id')
+      .eq('name', tournament_name)
+      .single();
+
+    if (findError || !tournament) {
+      console.log(`❌ Tournament not found: "${tournament_name}"`);
+      return res.status(404).json({ error: 'Tournament not found' });
+    }
+
+    const tournamentId = tournament.id;
+    console.log(`📋 Found tournament id=${tournamentId}`);
+
+    // Получаем всех бойцов турнира
+    const { data: fighters, error: fightersError } = await supabase
+      .from('fighters')
+      .select('*')
+      .eq('tournament_id', tournamentId);
+
+    if (fightersError) throw fightersError;
+
+    let updatedCount = 0;
+    for (const fighter of fighters) {
+      const newTotalDamage = calculateBaseDamage({
+        Kd: fighter.kd,
+        Td: fighter.td,
+        Sub: fighter.sub,
+        Head: fighter.head,
+        Body: fighter.body,
+        Leg: fighter.leg,
+        'W/L': fighter.wl || 'lose',
+        Method: fighter.method || '',
+        weight_class: fighter.weight_class || ''
+      });
+
+      const { error: updateError } = await supabase
+        .from('fighters')
+        .update({ total_damage: newTotalDamage })
+        .eq('id', fighter.id);
+
+      if (!updateError) updatedCount++;
+    }
+
+    console.log(`✅ Recalculated ${updatedCount}/${fighters.length} fighters`);
+
+    // Обновляем total_damage в ставках для этого турнира
+    const { data: bets } = await supabase
+      .from('bets')
+      .select('id, selections')
+      .eq('tournament_id', tournamentId)
+      .eq('cancelled', false);
+
+    for (const bet of bets) {
+      const selections = bet.selections;
+      let newTotalDamage = 0;
+      const updatedSelections = [];
+
+      for (const sel of selections) {
+        const fighterData = fighters.find(f => f.fighter_name === sel.fighter.Fighter);
+        if (fighterData) {
+          const newFighterDamage = fighterData.total_damage;
+          newTotalDamage += newFighterDamage;
+
+          updatedSelections.push({
+            ...sel,
+            fighter: {
+              ...sel.fighter,
+              'Total Damage': newFighterDamage
+            }
+          });
+        }
+      }
+
+      if (updatedSelections.length === 5) {
+        await supabase
+          .from('bets')
+          .update({ total_damage: newTotalDamage, selections: updatedSelections })
+          .eq('id', bet.id);
+      }
+    }
+
+    res.json({ success: true, updated: updatedCount, tournamentId });
+  } catch (err) {
+    console.error('❌ Recalculate error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ---------- ПЕРЕСЧЁТ УРОНА ДЛЯ ВСЕХ БОЙЦОВ ТУРНИРА ----------
+app.post('/api/tournaments/:id/recalculate', async (req, res) => {
+  try {
+    const tournamentId = parseInt(req.params.id);
+    if (isNaN(tournamentId)) return res.status(400).json({ error: 'Invalid tournament id' });
+
+    console.log(`🔄 Recalculating damage for tournament ${tournamentId}...`);
+
+    // Получаем всех бойцов турнира
+    const { data: fighters, error: fightersError } = await supabase
+      .from('fighters')
+      .select('*')
+      .eq('tournament_id', tournamentId);
+
+    if (fightersError) throw fightersError;
+
+    let updatedCount = 0;
+    for (const fighter of fighters) {
+      const newTotalDamage = calculateBaseDamage({
+        Kd: fighter.kd,
+        Td: fighter.td,
+        Sub: fighter.sub,
+        Head: fighter.head,
+        Body: fighter.body,
+        Leg: fighter.leg,
+        'W/L': fighter.wl || 'lose',
+        Method: fighter.method || '',
+        weight_class: fighter.weight_class || ''
+      });
+
+      const { error: updateError } = await supabase
+        .from('fighters')
+        .update({ total_damage: newTotalDamage })
+        .eq('id', fighter.id);
+
+      if (!updateError) updatedCount++;
+    }
+
+    console.log(`✅ Recalculated ${updatedCount}/${fighters.length} fighters`);
+
+    // Обновляем total_damage в ставках для этого турнира
+    const { data: bets } = await supabase
+      .from('bets')
+      .select('id, selections')
+      .eq('tournament_id', tournamentId)
+      .eq('cancelled', false);
+
+    for (const bet of bets) {
+      const selections = bet.selections;
+      let newTotalDamage = 0;
+      const updatedSelections = [];
+
+      for (const sel of selections) {
+        const fighterData = fighters.find(f => f.fighter_name === sel.fighter.Fighter);
+        if (fighterData) {
+          const newFighterDamage = fighterData.total_damage;
+          newTotalDamage += newFighterDamage;
+
+          updatedSelections.push({
+            ...sel,
+            fighter: {
+              ...sel.fighter,
+              'Total Damage': newFighterDamage
+            }
+          });
+        }
+      }
+
+      if (updatedSelections.length === 5) {
+        await supabase
+          .from('bets')
+          .update({ total_damage: newTotalDamage, selections: updatedSelections })
+          .eq('id', bet.id);
+      }
+    }
+
+    res.json({ success: true, updated: updatedCount });
+  } catch (err) {
+    console.error('❌ Recalculate error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ---------- ФУНКЦИЯ ОПРЕДЕЛЕНИЯ СТИЛЯ БОЙЦА ----------
 function getFighterStyle(str, td, sub) {
   const tdSubSum = td + sub;
@@ -656,7 +918,7 @@ function getFighterStyle(str, td, sub) {
   return 'simple';
 }
 
-// ---------- ФУНКЦИЯ РАСЧЁТА БАЗОВОГО УРОНА ----------
+// ---------- ФУНКЦИЯ РАСЧЁТА БАЗОВОГО УРОНА (использует коэффициенты из БД) ----------
 function calculateBaseDamage(fighterData, customHeadCoef = null, customBodyCoef = null, customLegCoef = null) {
   const kd = safeNumber(fighterData.Kd || fighterData.kd);
   const td = safeNumber(fighterData.Td || fighterData.td);
@@ -664,8 +926,27 @@ function calculateBaseDamage(fighterData, customHeadCoef = null, customBodyCoef 
   const head = safeNumber(fighterData.Head || fighterData.head);
   const body = safeNumber(fighterData.Body || fighterData.body);
   const leg = safeNumber(fighterData.Leg || fighterData.leg);
-  const wl = fighterData['W/L'] || 'lose';
-  const method = (fighterData.Method || '').toUpperCase();
+  const wl = (fighterData['W/L'] || fighterData.wl || 'lose').toLowerCase();
+  const method = (fighterData.Method || fighterData.method || '').toUpperCase();
+  const weightClass = fighterData.weight_class || fighterData['Weight class'] || '';
+  
+  // Если нет детальных данных — возвращаем готовый Total Damage
+  if (head === 0 && body === 0 && leg === 0 && kd === 0 && td === 0 && sub === 0) {
+    return safeNumber(fighterData['Total Damage'] || fighterData.total_damage);
+  }
+  
+  // Коэффициенты из БД
+  const KD_COEF = getCoef('KD_COEF') || 25.0;
+  const TD_COEF = getCoef('TD_COEF') || 10.0;
+  const SUB_COEF = getCoef('SUB_COEF') || 15.0;
+  const HEAD_COEF = getCoef('HEAD_COEF') || 1.0;
+  const BODY_COEF = getCoef('BODY_COEF') || 0.9;
+  const LEG_COEF = getCoef('LEG_COEF') || 0.8;
+  const WIN_COEF = getCoef('WIN_COEF') || 1.0;
+  const LOSE_COEF = getCoef('LOSE_COEF') || 0.7;
+  const DRAW_COEF = getCoef('DRAW_COEF') || 0.9;
+  const KD_BONUS_WIN = getCoef('KD_BONUS_WIN') || 40.0;
+  const SUB_BONUS_WIN = getCoef('SUB_BONUS_WIN') || 35.0;
   
   // Бонусы за способ завершения
   let kdBonus = 0;
@@ -673,9 +954,9 @@ function calculateBaseDamage(fighterData, customHeadCoef = null, customBodyCoef 
   
   if (wl === 'win') {
     if (method.includes('KO') || method.includes('TKO')) {
-      kdBonus = 65 - KD_COEF;
+      kdBonus = KD_BONUS_WIN;
     } else if (method.includes('SUB')) {
-      subBonus = 50 - SUB_COEF;
+      subBonus = SUB_BONUS_WIN;
     }
   }
   
@@ -688,6 +969,9 @@ function calculateBaseDamage(fighterData, customHeadCoef = null, customBodyCoef 
   const bodyCoef = customBodyCoef !== null ? customBodyCoef : BODY_COEF;
   const legCoef = customLegCoef !== null ? customLegCoef : LEG_COEF;
   
+  // Весовой коэффициент из БД
+  const weightCoef = getWeightCoefficient(weightClass);
+  
   const total = (
     kd * KD_COEF + kdBonus +
     td * TD_COEF +
@@ -695,7 +979,7 @@ function calculateBaseDamage(fighterData, customHeadCoef = null, customBodyCoef 
     head * headCoef +
     body * bodyCoef +
     leg * legCoef
-  ) * wkCoef * (safeNumber(fighterData['Weight Coefficient']) || 1.0);
+  ) * wkCoef * weightCoef;
   
   return Math.round(total);
 }
@@ -703,13 +987,11 @@ function calculateBaseDamage(fighterData, customHeadCoef = null, customBodyCoef 
 // ---------- ФУНКЦИЯ ПРИМЕНЕНИЯ PASSIVE СПОСОБНОСТЕЙ ----------
 function applyPassiveAbilities(cards, userAbilities, fightersData) {
   if (!userAbilities || userAbilities.length === 0) {
-    console.log('⚠️ No abilities to apply');
     return { cards, healthBonus: 0 };
   }
   
   let healthBonus = 0;
   
-  // Собираем бонусы от всех PASSIVE способностей
   const bonuses = {
     strikerDamageBonus: 0,
     headDamageBonus: 0,
@@ -717,112 +999,63 @@ function applyPassiveAbilities(cards, userAbilities, fightersData) {
     healthBonus: 0
   };
   
-  console.log('🔧 Collecting bonuses from abilities:');
   userAbilities.forEach(ability => {
     if (ability.type === 'passive' && ability.level_data) {
       const data = ability.level_data;
-      console.log(`  📋 ${ability.name} (level ${ability.current_level}):`, {
-        striker_damage_bonus: data.striker_damage_bonus,
-        head_damage_bonus: data.head_damage_bonus,
-        grappler_damage_bonus: data.grappler_damage_bonus,
-        health_bonus: data.health_bonus
-      });
       
-      if (data.striker_damage_bonus) {
-        bonuses.strikerDamageBonus += data.striker_damage_bonus;
-        console.log(`    ✅ strikerDamageBonus +${data.striker_damage_bonus}% = ${bonuses.strikerDamageBonus}%`);
-      }
-      if (data.head_damage_bonus) {
-        bonuses.headDamageBonus += data.head_damage_bonus;
-        console.log(`    ✅ headDamageBonus +${data.head_damage_bonus}% = ${bonuses.headDamageBonus}%`);
-      }
-      if (data.grappler_damage_bonus) {
-        bonuses.grapplerDamageBonus += data.grappler_damage_bonus;
-        console.log(`    ✅ grapplerDamageBonus +${data.grappler_damage_bonus}% = ${bonuses.grapplerDamageBonus}%`);
-      }
-      if (data.health_bonus) {
-        bonuses.healthBonus += data.health_bonus;
-        console.log(`    ✅ healthBonus +${data.health_bonus}% = ${bonuses.healthBonus}%`);
-      }
+      if (data.striker_damage_bonus) bonuses.strikerDamageBonus += data.striker_damage_bonus;
+      if (data.head_damage_bonus) bonuses.headDamageBonus += data.head_damage_bonus;
+      if (data.grappler_damage_bonus) bonuses.grapplerDamageBonus += data.grappler_damage_bonus;
+      if (data.health_bonus) bonuses.healthBonus += data.health_bonus;
     }
   });
   
-  console.log('📦 Total bonuses collected:', bonuses);
-  
-  // Применяем бонусы к кардам
   const modifiedCards = cards.map(selection => {
     const fighter = { ...selection.fighter };
     
-    // Определяем стиль бойца
     const str = safeNumber(fighter.Str);
     const td = safeNumber(fighter.Td);
     const sub = safeNumber(fighter.Sub);
     const fighterStyle = getFighterStyle(str, td, sub);
     
-    // Находим полные данные бойца из БД
     const fullFighterData = fightersData?.find(f => f.fighter_name === fighter.Fighter) || fighter;
-    if (!fullFighterData) {
-  console.log(`  ⚠️ Fighter ${fighter.Fighter} NOT FOUND in fightersData! Available: ${fightersData?.map(f => f.fighter_name).join(', ')}`);
-}
-    // Рассчитываем базовый урон
+    
     const baseTotalDamage = calculateBaseDamage(fullFighterData);
     
-    // Модифицируем коэффициенты с учётом бонусов
     let customHeadCoef = null;
     
     if (bonuses.headDamageBonus > 0) {
+      const HEAD_COEF = getCoef('HEAD_COEF') || 1.0;
       customHeadCoef = HEAD_COEF * (1 + bonuses.headDamageBonus / 100);
-      console.log(`  ✅ Head coefficient: ${HEAD_COEF} -> ${customHeadCoef.toFixed(2)} (+${bonuses.headDamageBonus}%)`);
     }
     
-    // Пересчитываем урон с модифицированными коэффициентами
     let totalDamage = calculateBaseDamage(fullFighterData, customHeadCoef);
     
-    console.log(`🔎 Fighter ${fighter.Fighter}: Str=${str}, Td=${td}, Sub=${sub}, style=${fighterStyle}, baseDamage=${baseTotalDamage}, afterCoef=${totalDamage}`);
-    
-    // Применяем стилевые бонусы к ИТОГОВОМУ урону
     if (fighterStyle === 'striker' && bonuses.strikerDamageBonus > 0) {
-      const oldDamage = totalDamage;
       totalDamage = Math.round(totalDamage * (1 + bonuses.strikerDamageBonus / 100));
-      console.log(`  ✅ Striker bonus: ${oldDamage} -> ${totalDamage} (+${bonuses.strikerDamageBonus}%)`);
     } else if (fighterStyle === 'grappler' && bonuses.grapplerDamageBonus > 0) {
-      const oldDamage = totalDamage;
       totalDamage = Math.round(totalDamage * (1 + bonuses.grapplerDamageBonus / 100));
-      console.log(`  ✅ Grappler bonus: ${oldDamage} -> ${totalDamage} (+${bonuses.grapplerDamageBonus}%)`);
     } else if (fighterStyle === 'universal' && (bonuses.strikerDamageBonus > 0 || bonuses.grapplerDamageBonus > 0)) {
       const halfStriker = (bonuses.strikerDamageBonus || 0) / 2;
       const halfGrappler = (bonuses.grapplerDamageBonus || 0) / 2;
       const totalBonus = halfStriker + halfGrappler;
-      const oldDamage = totalDamage;
       totalDamage = Math.round(totalDamage * (1 + totalBonus / 100));
-      console.log(`  ✅ Universal bonus: ${oldDamage} -> ${totalDamage} (+${totalBonus}%)`);
-    } else {
-      console.log(`  ℹ️ Style: ${fighterStyle} — no style-specific damage bonus`);
     }
     
-    const headDamage = safeNumber(fullFighterData.Head || fullFighterData.head);
-const bodyDamage = safeNumber(fullFighterData.Body || fullFighterData.body);
-const legDamage = safeNumber(fullFighterData.Leg || fullFighterData.leg);
-    
-console.log(`  📤 Final ${fighter.Fighter}: Total=${totalDamage}, Head=${headDamage}, Body=${bodyDamage}, Leg=${legDamage}`);
-
     return {
       ...selection,
       fighter: {
         ...fighter,
         'Total Damage': totalDamage,
-        'Head': headDamage,
-        'Body': bodyDamage,
-        'Leg': legDamage
+        'Head': safeNumber(fullFighterData.Head || fullFighterData.head),
+        'Body': safeNumber(fullFighterData.Body || fullFighterData.body),
+        'Leg': safeNumber(fullFighterData.Leg || fullFighterData.leg)
       }
     };
   });
   
   healthBonus = bonuses.healthBonus;
   
-
-  
-
   return { cards: modifiedCards, healthBonus };
 }
 
@@ -830,7 +1063,6 @@ console.log(`  📤 Final ${fighter.Fighter}: Total=${totalDamage}, Head=${headD
 function calculateBattleScript(userCards, rivalCards, allTournamentWeightClasses, userHealthBonus = 0, rivalHealthBonus = 0) {
   const events = [];
   
-  // Базовое здоровье с бонусами
   const baseHealth = 1000;
   let currentUserHealth = baseHealth + Math.round(baseHealth * (userHealthBonus / 100));
   let currentRivalHealth = baseHealth + Math.round(baseHealth * (rivalHealthBonus / 100));
@@ -930,7 +1162,6 @@ app.post('/api/pvp/start', authenticate, async (req, res) => {
 
     console.log(`🎮 PvP start: userId=${userId}, tournamentId=${tournamentId}, betAmount=${betAmount}`);
 
-    // 1. Получаем ставку пользователя
     const { data: userBet, error: betError } = await supabase
       .from('bets')
       .select('total_damage, selections')
@@ -943,7 +1174,6 @@ app.post('/api/pvp/start', authenticate, async (req, res) => {
       return res.status(400).json({ error: 'No valid bet found for this tournament' });
     }
 
-    // 2. Проверяем баланс
     const { data: user, error: userError } = await supabase
       .from('users')
       .select('coins, tickets')
@@ -954,13 +1184,11 @@ app.post('/api/pvp/start', authenticate, async (req, res) => {
       return res.status(400).json({ error: 'Not enough coins or tickets' });
     }
 
-    // 3. Списываем валюту
     await supabase.from('users')
       .update({ coins: user.coins - betAmount, tickets: user.tickets - 1 })
       .eq('id', userId);
 
-    // 4. Получаем способности пользователя
-    const { data: userAbilitiesData, error: userAbilitiesError } = await supabase
+    const { data: userAbilitiesData } = await supabase
       .from('user_abilities')
       .select(`
         ability_id,
@@ -975,12 +1203,7 @@ app.post('/api/pvp/start', authenticate, async (req, res) => {
       `)
       .eq('user_id', userId)
       .gt('current_level', 0);
-      
-    if (userAbilitiesError) {
-      console.error('Error loading user abilities:', userAbilitiesError);
-    }
     
-    // Получаем уровни способностей
     let userAbilities = [];
     if (userAbilitiesData && userAbilitiesData.length > 0) {
       const abilityIds = userAbilitiesData.map(ua => ua.ability_id);
@@ -997,30 +1220,21 @@ app.post('/api/pvp/start', authenticate, async (req, res) => {
     }
     
     console.log(`🎯 User abilities: ${userAbilities.length}`);
-    console.log('🔍 USER ABILITIES DETAIL:');
-    userAbilities.forEach(ua => {
-      console.log(`  - ${ua.name} (${ua.type}) level ${ua.current_level}/${ua.max_level}:`, ua.level_data);
-    });
 
-    // 5. Получаем весовые категории турнира
-    const { data: tournamentFighters, error: fightersError } = await supabase
+    const { data: tournamentFighters } = await supabase
       .from('fighters')
       .select('weight_class')
       .eq('tournament_id', tournamentId);
-    if (fightersError) throw fightersError;
     
     const allWeightClasses = [...new Set(tournamentFighters.map(f => f.weight_class))];
-    console.log(`📊 Weight classes:`, allWeightClasses);
 
-    // 6. Ищем соперника
-    const { data: rivals, error: rivalError } = await supabase
+    const { data: rivals } = await supabase
       .from('bets')
       .select('user_id, total_damage, selections')
       .eq('tournament_id', tournamentId)
       .eq('cancelled', false)
       .neq('user_id', userId);
 
-    if (rivalError) throw rivalError;
     if (!rivals || rivals.length === 0) {
       await supabase.from('users')
         .update({ coins: user.coins, tickets: user.tickets })
@@ -1028,26 +1242,20 @@ app.post('/api/pvp/start', authenticate, async (req, res) => {
       return res.status(400).json({ error: 'No opponents available' });
     }
 
-    // Выбираем ближайшего по урону соперника
     const userDamage = userBet.total_damage;
     let bestRival = rivals[0];
     let minDiff = Math.abs(userDamage - bestRival.total_damage);
     for (const r of rivals) {
       const diff = Math.abs(userDamage - r.total_damage);
-      if (diff < minDiff) {
-        minDiff = diff;
-        bestRival = r;
-      }
+      if (diff < minDiff) { minDiff = diff; bestRival = r; }
     }
 
-    // 7. Получаем профиль и способности соперника
     const { data: rivalProfile } = await supabase
       .from('users')
       .select('username, photo_url')
       .eq('id', bestRival.user_id)
       .single();
 
-    // Получаем способности соперника
     const { data: rivalAbilitiesData } = await supabase
       .from('user_abilities')
       .select(`
@@ -1080,12 +1288,7 @@ app.post('/api/pvp/start', authenticate, async (req, res) => {
     }
     
     console.log(`🎯 Rival abilities: ${rivalAbilities.length}`);
-    console.log('🔍 RIVAL ABILITIES DETAIL:');
-    rivalAbilities.forEach(ua => {
-      console.log(`  - ${ua.name} (${ua.type}) level ${ua.current_level}/${ua.max_level}:`, ua.level_data);
-    });
 
-    // 8. Загружаем полные данные бойцов из БД
     const userCards = userBet.selections;
     const rivalCards = bestRival.selections;
     
@@ -1095,19 +1298,6 @@ app.post('/api/pvp/start', authenticate, async (req, res) => {
       .select('*')
       .in('fighter_name', allFighterNames)
       .eq('tournament_id', tournamentId);
-
-    console.log(`📊 Loaded ${fightersData?.length || 0} fighters data for damage calculation`);
-    // ← СЮДА ДОБАВИТЬ ЛОГ:
-    console.log('📊 Loaded fighters data:');
-    if (fightersData) {
-      fightersData.forEach(f => console.log(`  ${f.fighter_name}: Head=${f.head}, Body=${f.body}, Leg=${f.leg}, Total=${f.total_damage}`));
-    }
-    
-    console.log('📊 USER CARDS BEFORE BONUSES:');
-    userCards.forEach(c => console.log(`  ${c.fighter.Fighter}: damage=${c.fighter['Total Damage']}, Str=${c.fighter.Str}, Td=${c.fighter.Td}, Sub=${c.fighter.Sub}`));
-    
-    console.log('📊 RIVAL CARDS BEFORE BONUSES:');
-    rivalCards.forEach(c => console.log(`  ${c.fighter.Fighter}: damage=${c.fighter['Total Damage']}, Str=${c.fighter.Str}, Td=${c.fighter.Td}, Sub=${c.fighter.Sub}`));
     
     const { cards: enhancedUserCards, healthBonus: userHealthBonus } = 
       applyPassiveAbilities(userCards, userAbilities, fightersData);
@@ -1116,14 +1306,7 @@ app.post('/api/pvp/start', authenticate, async (req, res) => {
 
     console.log(`💪 User health bonus: +${userHealthBonus}%`);
     console.log(`💪 Rival health bonus: +${rivalHealthBonus}%`);
-    
-    console.log('📊 USER CARDS AFTER BONUSES:');
-    enhancedUserCards.forEach(c => console.log(`  ${c.fighter.Fighter}: damage=${c.fighter['Total Damage']}`));
-    
-    console.log('📊 RIVAL CARDS AFTER BONUSES:');
-    enhancedRivalCards.forEach(c => console.log(`  ${c.fighter.Fighter}: damage=${c.fighter['Total Damage']}`));
 
-    // 9. Генерируем сценарий боя с учётом бонусов
     const { events: battleEvents, winningRound } = calculateBattleScript(
       enhancedUserCards, 
       enhancedRivalCards, 
@@ -1132,7 +1315,6 @@ app.post('/api/pvp/start', authenticate, async (req, res) => {
       rivalHealthBonus
     );
 
-    // 10. Рассчитываем результаты
     const lastEvent = battleEvents[battleEvents.length - 1];
     const { result, resultType } = lastEvent.result;
 
@@ -1147,8 +1329,7 @@ app.post('/api/pvp/start', authenticate, async (req, res) => {
 
     let winCoefficient = baseCoeff;
     if (result === 'win' && resultType === 'ko' && winningRound < 5) {
-      const roundsNotFought = 5 - winningRound;
-      winCoefficient = baseCoeff + roundsNotFought * 0.1;
+      winCoefficient = baseCoeff + (5 - winningRound) * 0.1;
     }
 
     console.log(`🏆 Result: ${result} ${resultType || ''}, round: ${winningRound}, coeff: ${winCoefficient}`);
@@ -1164,7 +1345,6 @@ app.post('/api/pvp/start', authenticate, async (req, res) => {
       expReward = 4;
     }
 
-    // 11. Обновляем победителя
     const winnerId = result === 'win' ? userId : (result === 'loss' ? bestRival.user_id : null);
     let updatedWinner = null;
     if (winnerId) {
@@ -1179,47 +1359,27 @@ app.post('/api/pvp/start', authenticate, async (req, res) => {
       
       const { level, currentExp, nextLevelExp } = calculateLevel(newExp);
       let newExpPoints = winner.exp_points;
-      if (level > winner.level) {
-        newExpPoints += (level - winner.level);
-      }
+      if (level > winner.level) newExpPoints += (level - winner.level);
       
       await supabase.from('users')
-        .update({
-          coins: newCoins,
-          experience: newExp,
-          level: level,
-          exp_points: newExpPoints
-        })
+        .update({ coins: newCoins, experience: newExp, level: level, exp_points: newExpPoints })
         .eq('id', winnerId);
       
       updatedWinner = {
-        userId: winnerId,
-        coins: newCoins,
-        totalExp: newExp,
-        level,
-        currentExp,
-        nextLevelExp,
-        expPoints: newExpPoints
+        userId: winnerId, coins: newCoins, totalExp: newExp,
+        level, currentExp, nextLevelExp, expPoints: newExpPoints
       };
     }
 
-    // 12. Сохраняем историю боя
     await supabase.from('pvp_battles').insert({
-      user_id: userId,
-      rival_id: bestRival.user_id,
-      tournament_id: tournamentId,
-      bet_amount: betAmount,
-      result: result,
-      winner_id: winnerId,
+      user_id: userId, rival_id: bestRival.user_id, tournament_id: tournamentId,
+      bet_amount: betAmount, result: result, winner_id: winnerId,
       user_total_damage: enhancedUserCards.reduce((s, c) => s + c.fighter['Total Damage'], 0),
       rival_total_damage: enhancedRivalCards.reduce((s, c) => s + c.fighter['Total Damage'], 0)
     });
 
     const { data: updatedUser } = await supabase
-      .from('users')
-      .select('coins, tickets')
-      .eq('id', userId)
-      .single();
+      .from('users').select('coins, tickets').eq('id', userId).single();
 
     res.json({
       success: true,
@@ -1230,14 +1390,8 @@ app.post('/api/pvp/start', authenticate, async (req, res) => {
         photoUrl: rivalProfile?.photo_url,
         selections: rivalCards
       },
-      healthBonuses: {
-        user: userHealthBonus,
-        rival: rivalHealthBonus
-      },
-      updatedBalance: {
-        coins: updatedUser.coins,
-        tickets: updatedUser.tickets
-      },
+      healthBonuses: { user: userHealthBonus, rival: rivalHealthBonus },
+      updatedBalance: { coins: updatedUser.coins, tickets: updatedUser.tickets },
       updatedWinner: updatedWinner
     });
   } catch (err) {
@@ -1247,166 +1401,79 @@ app.post('/api/pvp/start', authenticate, async (req, res) => {
 });
 
 // ---------- СПОСОБНОСТИ ----------
-
-// Получение способностей для стиля
 app.get('/api/abilities/:style', authenticate, async (req, res) => {
   try {
     const { style } = req.params;
     const userId = req.user.userId;
     
-    if (!['striker', 'grappler'].includes(style)) {
-      return res.status(400).json({ error: 'Invalid style' });
-    }
+    if (!['striker', 'grappler'].includes(style)) return res.status(400).json({ error: 'Invalid style' });
     
-    // Получаем способности
-    const { data: abilities, error: abilitiesError } = await supabase
-      .from('abilities')
-      .select('*')
-      .eq('style', style)
-      .order('row_position', { ascending: true })
-      .order('col_position', { ascending: true });
-      
-    if (abilitiesError) throw abilitiesError;
+    const { data: abilities } = await supabase
+      .from('abilities').select('*').eq('style', style)
+      .order('row_position').order('col_position');
     
-    // Получаем уровни для каждой способности
     const abilityIds = abilities.map(a => a.id);
-    const { data: levels, error: levelsError } = await supabase
-      .from('ability_levels')
-      .select('*')
-      .in('ability_id', abilityIds)
-      .order('level', { ascending: true });
-      
-    if (levelsError) throw levelsError;
+    const { data: levels } = await supabase
+      .from('ability_levels').select('*').in('ability_id', abilityIds).order('level');
     
-    // Группируем уровни по ability_id
     const levelsByAbility = levels.reduce((acc, level) => {
       if (!acc[level.ability_id]) acc[level.ability_id] = [];
       acc[level.ability_id].push(level);
       return acc;
     }, {});
     
-    // Добавляем уровни к способностям
     const abilitiesWithLevels = abilities.map(ability => ({
       ...ability,
       levels: levelsByAbility[ability.id] || []
     }));
     
-    // Получаем изученные способности пользователя
-    const { data: userAbilities, error: userError } = await supabase
-      .from('user_abilities')
-      .select('ability_id, current_level')
-      .eq('user_id', userId);
-      
-    if (userError) throw userError;
+    const { data: userAbilities } = await supabase
+      .from('user_abilities').select('ability_id, current_level').eq('user_id', userId);
     
-    res.json({
-      abilities: abilitiesWithLevels,
-      userAbilities: userAbilities || []
-    });
+    res.json({ abilities: abilitiesWithLevels, userAbilities: userAbilities || [] });
   } catch (err) {
     console.error('Error loading abilities:', err);
     res.status(500).json({ error: err.message });
   }
 });
 
-// Изучение/улучшение способности
 app.post('/api/abilities/learn', authenticate, async (req, res) => {
   try {
     const { ability_id, level } = req.body;
     const userId = req.user.userId;
     
-    // Получаем информацию о способности
-    const { data: ability, error: abilityError } = await supabase
-      .from('abilities')
-      .select('*')
-      .eq('id', ability_id)
-      .single();
-      
-    if (abilityError) throw abilityError;
+    const { data: ability } = await supabase.from('abilities').select('*').eq('id', ability_id).single();
+    if (!ability) return res.status(404).json({ error: 'Ability not found' });
     
-    // Получаем данные уровня
-    const { data: levelData, error: levelError } = await supabase
-      .from('ability_levels')
-      .select('*')
-      .eq('ability_id', ability_id)
-      .eq('level', level)
-      .single();
-      
-    if (levelError) throw levelError;
+    const { data: levelData } = await supabase
+      .from('ability_levels').select('*').eq('ability_id', ability_id).eq('level', level).single();
+    if (!levelData) return res.status(404).json({ error: 'Level not found' });
     
-    // Проверяем уровень игрока
-    const { data: user, error: userError } = await supabase
-      .from('users')
-      .select('level, exp_points')
-      .eq('id', userId)
-      .single();
-      
-    if (userError) throw userError;
+    const { data: user } = await supabase.from('users').select('level, exp_points').eq('id', userId).single();
     
-    if (user.level < ability.min_level) {
-      return res.status(400).json({ error: 'Player level too low' });
-    }
+    if (user.level < ability.min_level) return res.status(400).json({ error: 'Player level too low' });
     
-    // Проверяем родительскую способность
     if (ability.parent_ability_id) {
-      const { data: parentAbility, error: parentError } = await supabase
-        .from('user_abilities')
-        .select('current_level')
-        .eq('user_id', userId)
-        .eq('ability_id', ability.parent_ability_id)
-        .single();
-        
-      if (parentError || !parentAbility || parentAbility.current_level === 0) {
-        return res.status(400).json({ error: 'Parent ability not learned' });
-      }
+      const { data: parent } = await supabase
+        .from('user_abilities').select('current_level')
+        .eq('user_id', userId).eq('ability_id', ability.parent_ability_id).single();
+      if (!parent || parent.current_level === 0) return res.status(400).json({ error: 'Parent ability not learned' });
     }
     
-    // Проверяем EXP points
-    if (user.exp_points < levelData.cost) {
-      return res.status(400).json({ error: 'Not enough EXP points' });
-    }
+    if (user.exp_points < levelData.cost) return res.status(400).json({ error: 'Not enough EXP points' });
     
-    // Обновляем EXP points
-    const { error: updateError } = await supabase
-      .from('users')
-      .update({ exp_points: user.exp_points - levelData.cost })
-      .eq('id', userId);
-      
-    if (updateError) throw updateError;
+    await supabase.from('users').update({ exp_points: user.exp_points - levelData.cost }).eq('id', userId);
     
-    // Сохраняем/обновляем способность пользователя
-    const { data: existing, error: existingError } = await supabase
-      .from('user_abilities')
-      .select('id')
-      .eq('user_id', userId)
-      .eq('ability_id', ability_id)
-      .single();
-      
-    if (existingError && existingError.code !== 'PGRST116') throw existingError;
+    const { data: existing } = await supabase
+      .from('user_abilities').select('id').eq('user_id', userId).eq('ability_id', ability_id).single();
     
     if (existing) {
-      const { error: updateAbilityError } = await supabase
-        .from('user_abilities')
-        .update({ current_level: level, updated_at: new Date() })
-        .eq('id', existing.id);
-        
-      if (updateAbilityError) throw updateAbilityError;
+      await supabase.from('user_abilities').update({ current_level: level, updated_at: new Date() }).eq('id', existing.id);
     } else {
-      const { error: insertError } = await supabase
-        .from('user_abilities')
-        .insert([{
-          user_id: userId,
-          ability_id: ability_id,
-          current_level: level
-        }]);
-        
-      if (insertError) throw insertError;
+      await supabase.from('user_abilities').insert([{ user_id: userId, ability_id: ability_id, current_level: level }]);
     }
     
-    res.json({ 
-      success: true, 
-      new_exp_points: user.exp_points - levelData.cost 
-    });
+    res.json({ success: true, new_exp_points: user.exp_points - levelData.cost });
   } catch (err) {
     console.error('Error learning ability:', err);
     res.status(500).json({ error: err.message });
