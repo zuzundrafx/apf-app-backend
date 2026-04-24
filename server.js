@@ -802,6 +802,8 @@ function applyPassiveAbilities(cards, userAbilities, fightersData) {
     const bodyDamage = safeNumber(fullFighterData.Body);
     const legDamage = safeNumber(fullFighterData.Leg);
     
+console.log(`  📤 Final ${fighter.Fighter}: Total=${totalDamage}, Head=${headDamage}, Body=${bodyDamage}, Leg=${legDamage}`);
+
     return {
       ...selection,
       fighter: {
@@ -817,7 +819,7 @@ function applyPassiveAbilities(cards, userAbilities, fightersData) {
   healthBonus = bonuses.healthBonus;
   
 
-  console.log(`  📤 Final ${fighter.Fighter}: Total=${totalDamage}, Head=${headDamage}, Body=${bodyDamage}, Leg=${legDamage}`);
+  
 
   return { cards: modifiedCards, healthBonus };
 }
