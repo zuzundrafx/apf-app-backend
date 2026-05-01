@@ -1,4 +1,4 @@
-// server.js – ПОЛНЫЙ ФАЙЛ с загрузкой коэффициентов из БД и пересчётом урона
+// server.js – ПОЛНЫЙ ФАЙЛ с обработкой замен бойцов в upcoming турнирах
 require('dotenv').config();
 const express = require('express');
 const { createClient } = require('@supabase/supabase-js');
@@ -631,14 +631,65 @@ app.post('/api/tournaments/sync', async (req, res) => {
     }
     console.log(`✅ Inserted/updated ${insertedCount} fighters`);
 
+    // ===== НОВОЕ: Обработка замен бойцов для ВСЕХ турниров (не только completed) =====
+    console.log('🔍 Checking for fighter replacements...');
+    const { data: activeBets, error: betsError } = await supabase
+      .from('bets')
+      .select('*')
+      .eq('tournament_id', dbTournament.id)
+      .eq('cancelled', false);
+
+    if (betsError) {
+      console.error('Error loading active bets:', betsError);
+    } else if (activeBets && activeBets.length > 0) {
+      for (const bet of activeBets) {
+        // Пропускаем уже обработанные ставки (с rewards_created)
+        if (bet.rewards_created) continue;
+        
+        const selections = bet.selections;
+        let hasReplacement = false;
+        const replacedFighters = [];
+
+        for (const sel of selections) {
+          const fighterExists = fighters.find(f => f.Fighter === sel.fighter.Fighter);
+          if (!fighterExists) {
+            hasReplacement = true;
+            replacedFighters.push({
+              originalFighter: sel.fighter.Fighter,
+              weightClass: sel.weightClass
+            });
+          }
+        }
+
+        if (hasReplacement) {
+          console.log(`  ⚠️ Bet ${bet.id} has ${replacedFighters.length} replaced fighter(s):`, replacedFighters.map(f => f.originalFighter).join(', '));
+          
+          await supabase.from('bets').update({ cancelled: true }).eq('id', bet.id);
+          
+          await supabase.from('notifications').insert({
+            user_id: bet.user_id,
+            type: 'bet_cancelled',
+            tournament_name: dbTournament.name,
+            data: {
+              refundAmount: bet.bet_amount,
+              cancelledFighters: replacedFighters,
+              message: 'Fighter(s) have been replaced. Please make a new bet.'
+            }
+          });
+          
+          console.log(`  ✅ Bet ${bet.id} cancelled, refund: ${bet.bet_amount} coins`);
+        }
+      }
+    }
+
     if (is_completed) {
       console.log('🏁 Tournament completed, processing bets...');
-      const { data: bets } = await supabase
+      const { data: completedBets } = await supabase
         .from('bets').select('*')
         .eq('tournament_id', dbTournament.id)
         .eq('cancelled', false);
 
-      for (const bet of bets) {
+      for (const bet of completedBets) {
         if (bet.rewards_created) continue;
 
         const selections = bet.selections;
@@ -736,7 +787,6 @@ app.post('/api/tournaments/recalculate', async (req, res) => {
 
     console.log(`🔄 Recalculate requested for: "${tournament_name}"`);
 
-    // Находим турнир по имени
     const { data: tournament, error: findError } = await supabase
       .from('tournaments')
       .select('id')
@@ -751,7 +801,6 @@ app.post('/api/tournaments/recalculate', async (req, res) => {
     const tournamentId = tournament.id;
     console.log(`📋 Found tournament id=${tournamentId}`);
 
-    // Получаем всех бойцов турнира
     const { data: fighters, error: fightersError } = await supabase
       .from('fighters')
       .select('*')
@@ -783,7 +832,6 @@ app.post('/api/tournaments/recalculate', async (req, res) => {
 
     console.log(`✅ Recalculated ${updatedCount}/${fighters.length} fighters`);
 
-    // Обновляем total_damage в ставках для этого турнира
     const { data: bets } = await supabase
       .from('bets')
       .select('id, selections')
@@ -834,7 +882,6 @@ app.post('/api/tournaments/:id/recalculate', async (req, res) => {
 
     console.log(`🔄 Recalculating damage for tournament ${tournamentId}...`);
 
-    // Получаем всех бойцов турнира
     const { data: fighters, error: fightersError } = await supabase
       .from('fighters')
       .select('*')
@@ -866,7 +913,6 @@ app.post('/api/tournaments/:id/recalculate', async (req, res) => {
 
     console.log(`✅ Recalculated ${updatedCount}/${fighters.length} fighters`);
 
-    // Обновляем total_damage в ставках для этого турнира
     const { data: bets } = await supabase
       .from('bets')
       .select('id, selections')
