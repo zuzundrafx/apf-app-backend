@@ -1,4 +1,4 @@
-// server.js – ПОЛНЫЙ ФАЙЛ с обработкой замен бойцов в upcoming турнирах
+// server.js – ПОЛНЫЙ ФАЙЛ с исправленной формулой PvP урона и начислением опыта
 require('dotenv').config();
 const express = require('express');
 const { createClient } = require('@supabase/supabase-js');
@@ -67,13 +67,9 @@ async function loadCoefficients() {
   }
 }
 
-// Загружаем коэффициенты при старте
 loadCoefficients();
-
-// Периодически обновляем кэш (каждые 5 минут)
 setInterval(loadCoefficients, 5 * 60 * 1000);
 
-// API для получения коэффициентов
 app.get('/api/coefficients', async (req, res) => {
   try {
     const { data, error } = await supabase
@@ -89,7 +85,6 @@ app.get('/api/coefficients', async (req, res) => {
   }
 });
 
-// Вспомогательные функции для получения коэффициентов
 function getCoef(key) {
   return COEFFICIENTS[key] !== undefined ? COEFFICIENTS[key] : 0;
 }
@@ -156,12 +151,7 @@ app.post('/api/auth/telegram', async (req, res) => {
     const { level, currentExp, nextLevelExp } = calculateLevel(existingUser.experience);
     res.json({
       token,
-      user: {
-        ...existingUser,
-        level,
-        currentExp,
-        nextLevelExp
-      }
+      user: { ...existingUser, level, currentExp, nextLevelExp }
     });
   } catch (err) {
     console.error(err);
@@ -176,12 +166,7 @@ app.get('/api/user/profile', authenticate, async (req, res) => {
       .from('users').select('*').eq('id', req.user.userId).single();
     if (error) throw error;
     const { level, currentExp, nextLevelExp } = calculateLevel(user.experience);
-    res.json({
-      ...user,
-      level,
-      currentExp,
-      nextLevelExp
-    });
+    res.json({ ...user, level, currentExp, nextLevelExp });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message });
@@ -192,10 +177,7 @@ app.get('/api/user/profile', authenticate, async (req, res) => {
 app.get('/api/user/style', authenticate, async (req, res) => {
   try {
     const { data: user, error } = await supabase
-      .from('users')
-      .select('style')
-      .eq('id', req.user.userId)
-      .single();
+      .from('users').select('style').eq('id', req.user.userId).single();
     if (error) throw error;
     res.json({ style: user.style });
   } catch (err) {
@@ -210,24 +192,13 @@ app.post('/api/user/style', authenticate, async (req, res) => {
     if (!style || (style !== 'striker' && style !== 'grappler')) {
       return res.status(400).json({ error: 'Invalid style' });
     }
-    
     const { data: user, error: userError } = await supabase
-      .from('users')
-      .select('style')
-      .eq('id', req.user.userId)
-      .single();
+      .from('users').select('style').eq('id', req.user.userId).single();
     if (userError) throw userError;
-    
-    if (user.style) {
-      return res.status(400).json({ error: 'Style already chosen' });
-    }
-    
+    if (user.style) return res.status(400).json({ error: 'Style already chosen' });
     const { error: updateError } = await supabase
-      .from('users')
-      .update({ style })
-      .eq('id', req.user.userId);
+      .from('users').update({ style }).eq('id', req.user.userId);
     if (updateError) throw updateError;
-    
     res.json({ success: true, style });
   } catch (err) {
     console.error(err);
@@ -287,24 +258,15 @@ app.post('/api/bets', authenticate, async (req, res) => {
     const { data: user, error: userError } = await supabase
       .from('users').select('coins').eq('id', userId).single();
     if (userError) throw userError;
-    if (user.coins < betAmount) {
-      return res.status(400).json({ error: 'Not enough coins' });
-    }
+    if (user.coins < betAmount) return res.status(400).json({ error: 'Not enough coins' });
 
-    await supabase.from('users')
-      .update({ coins: user.coins - betAmount }).eq('id', userId);
+    await supabase.from('users').update({ coins: user.coins - betAmount }).eq('id', userId);
 
-    // Рассчитываем Total Damage через серверную функцию
     const totalDamage = selections.reduce((sum, sel) => {
       const dmg = calculateBaseDamage({
-        Kd: sel.fighter.Kd || 0,
-        Td: sel.fighter.Td || 0,
-        Sub: sel.fighter.Sub || 0,
-        Head: sel.fighter.Head || 0,
-        Body: sel.fighter.Body || 0,
-        Leg: sel.fighter.Leg || 0,
-        'W/L': sel.fighter['W/L'] || 'lose',
-        Method: sel.fighter.Method || '',
+        Kd: sel.fighter.Kd || 0, Td: sel.fighter.Td || 0, Sub: sel.fighter.Sub || 0,
+        Head: sel.fighter.Head || 0, Body: sel.fighter.Body || 0, Leg: sel.fighter.Leg || 0,
+        'W/L': sel.fighter['W/L'] || 'lose', Method: sel.fighter.Method || '',
         weight_class: sel.weightClass
       });
       return sum + dmg;
@@ -340,8 +302,7 @@ app.get('/api/bets/user/:userId/tournament/:tournamentId', async (req, res) => {
   try {
     const { userId, tournamentId } = req.params;
     const { data, error } = await supabase
-      .from('bets').select('*')
-      .eq('user_id', userId).eq('tournament_id', tournamentId).single();
+      .from('bets').select('*').eq('user_id', userId).eq('tournament_id', tournamentId).single();
     if (error && error.code !== 'PGRST116') throw error;
     res.json(data || null);
   } catch (err) {
@@ -369,8 +330,7 @@ app.post('/api/notifications/claim-all', authenticate, async (req, res) => {
   try {
     const userId = req.user.userId;
     const { data: notifications, error: notifError } = await supabase
-      .from('notifications').select('*')
-      .eq('user_id', userId).eq('claimed', false);
+      .from('notifications').select('*').eq('user_id', userId).eq('claimed', false);
     if (notifError) throw notifError;
 
     let totalCoins = 0, totalTickets = 0, totalExp = 0;
@@ -386,8 +346,7 @@ app.post('/api/notifications/claim-all', authenticate, async (req, res) => {
 
     if (totalCoins > 0 || totalTickets > 0 || totalExp > 0) {
       const { data: user, error: userError } = await supabase
-        .from('users').select('coins, tickets, experience, level, exp_points')
-        .eq('id', userId).single();
+        .from('users').select('coins, tickets, experience, level, exp_points').eq('id', userId).single();
       if (userError) throw userError;
 
       const newCoins = user.coins + totalCoins;
@@ -405,22 +364,12 @@ app.post('/api/notifications/claim-all', authenticate, async (req, res) => {
     }
 
     const ids = notifications.map(n => n.id);
-    if (ids.length > 0) {
-      await supabase.from('notifications').update({ claimed: true }).in('id', ids);
-    }
+    if (ids.length > 0) await supabase.from('notifications').update({ claimed: true }).in('id', ids);
 
     const { data: updatedUser } = await supabase
       .from('users').select('coins, tickets, experience').eq('id', userId).single();
     const { level, currentExp, nextLevelExp } = calculateLevel(updatedUser.experience);
-    res.json({
-      success: true,
-      newCoins: updatedUser.coins,
-      newTickets: updatedUser.tickets,
-      newExp: updatedUser.experience,
-      level,
-      currentExp,
-      nextLevelExp
-    });
+    res.json({ success: true, newCoins: updatedUser.coins, newTickets: updatedUser.tickets, newExp: updatedUser.experience, level, currentExp, nextLevelExp });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message });
@@ -433,26 +382,14 @@ app.post('/api/notifications/:id/claim', authenticate, async (req, res) => {
     const userId = req.user.userId;
 
     const { data: notification, error: notifError } = await supabase
-      .from('notifications')
-      .select('*')
-      .eq('id', notificationId)
-      .eq('user_id', userId)
-      .eq('claimed', false)
-      .single();
-    
+      .from('notifications').select('*').eq('id', notificationId).eq('user_id', userId).eq('claimed', false).single();
     if (notifError) throw notifError;
     if (!notification) return res.status(404).json({ error: 'Notification not found' });
-    if (notification.type !== 'tournament_reward') {
-      return res.status(400).json({ error: 'Not a reward notification' });
-    }
+    if (notification.type !== 'tournament_reward') return res.status(400).json({ error: 'Not a reward notification' });
 
     const { coins, tickets, experience } = notification.data;
-    
     const { data: user, error: userError } = await supabase
-      .from('users')
-      .select('coins, tickets, experience, level, exp_points')
-      .eq('id', userId)
-      .single();
+      .from('users').select('coins, tickets, experience, level, exp_points').eq('id', userId).single();
     if (userError) throw userError;
 
     const newCoins = user.coins + (coins || 0);
@@ -464,25 +401,13 @@ app.post('/api/notifications/:id/claim', authenticate, async (req, res) => {
     if (level > user.level) newExpPoints += (level - user.level);
 
     await supabase.from('users').update({
-      coins: newCoins,
-      tickets: newTickets,
-      experience: newExp,
-      level: level,
-      exp_points: newExpPoints
+      coins: newCoins, tickets: newTickets, experience: newExp,
+      level: level, exp_points: newExpPoints
     }).eq('id', userId);
 
     await supabase.from('notifications').update({ claimed: true }).eq('id', notificationId);
 
-    res.json({
-      success: true,
-      newCoins,
-      newTickets,
-      newExp,
-      level,
-      currentExp,
-      nextLevelExp,
-      expPoints: newExpPoints
-    });
+    res.json({ success: true, newCoins, newTickets, newExp, level, currentExp, nextLevelExp, expPoints: newExpPoints });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message });
@@ -495,17 +420,12 @@ app.post('/api/notifications/:id/claim-refund', authenticate, async (req, res) =
     const userId = req.user.userId;
 
     const { data: notification, error: notifError } = await supabase
-      .from('notifications').select('*')
-      .eq('id', notificationId).eq('user_id', userId).single();
+      .from('notifications').select('*').eq('id', notificationId).eq('user_id', userId).single();
     if (notifError) throw notifError;
-    if (notification.type !== 'bet_cancelled') {
-      return res.status(400).json({ error: 'Not a refund notification' });
-    }
+    if (notification.type !== 'bet_cancelled') return res.status(400).json({ error: 'Not a refund notification' });
 
     const refundAmount = notification.data.refundAmount || 0;
-    if (refundAmount > 0) {
-      await supabase.rpc('increment_coins', { user_id: userId, amount: refundAmount });
-    }
+    if (refundAmount > 0) await supabase.rpc('increment_coins', { user_id: userId, amount: refundAmount });
     await supabase.from('notifications').update({ claimed: true }).eq('id', notificationId);
     res.json({ success: true });
   } catch (err) {
@@ -519,28 +439,19 @@ app.get('/api/leaderboard/:tournamentId', async (req, res) => {
   try {
     const tournamentId = parseInt(req.params.tournamentId);
     const { data: bets, error: betsError } = await supabase
-      .from('bets')
-      .select('user_id, total_damage, created_at')
-      .eq('tournament_id', tournamentId)
-      .eq('cancelled', false)
-      .order('total_damage', { ascending: false })
-      .limit(100);
+      .from('bets').select('user_id, total_damage, created_at')
+      .eq('tournament_id', tournamentId).eq('cancelled', false)
+      .order('total_damage', { ascending: false }).limit(100);
     if (betsError) throw betsError;
 
     const userIds = bets.map(b => b.user_id);
-    const { data: users } = await supabase
-      .from('users')
-      .select('id, username')
-      .in('id', userIds);
-
+    const { data: users } = await supabase.from('users').select('id, username').in('id', userIds);
     const userMap = new Map(users.map(u => [u.id, u.username]));
 
     const leaderboard = bets.map((bet, index) => ({
-      rank: index + 1,
-      userId: bet.user_id,
+      rank: index + 1, userId: bet.user_id,
       username: userMap.get(bet.user_id) || 'Unknown',
-      totalDamage: bet.total_damage,
-      timestamp: bet.created_at
+      totalDamage: bet.total_damage, timestamp: bet.created_at
     }));
     res.json(leaderboard);
   } catch (err) {
@@ -549,7 +460,7 @@ app.get('/api/leaderboard/:tournamentId', async (req, res) => {
   }
 });
 
-// ---------- СИНХРОНИЗАЦИЯ ОТ ПАРСЕРА ----------
+// ---------- СИНХРОНИЗАЦИЯ ----------
 app.post('/api/tournaments/sync', async (req, res) => {
   try {
     const { tournament, fighters, is_completed } = req.body;
@@ -561,8 +472,7 @@ app.post('/api/tournaments/sync', async (req, res) => {
 
     if (!dbTournament) {
       const { data: newT, error: insertError } = await supabase
-        .from('tournaments').insert([{ ...tournament, status: is_completed ? 'completed' : 'upcoming' }])
-        .select().single();
+        .from('tournaments').insert([{ ...tournament, status: is_completed ? 'completed' : 'upcoming' }]).select().single();
       if (insertError) throw insertError;
       dbTournament = newT;
       console.log(`🆕 Created tournament id=${dbTournament.id}`);
@@ -578,105 +488,61 @@ app.post('/api/tournaments/sync', async (req, res) => {
     let insertedCount = 0;
     for (const f of fighters) {
       const { data: existing } = await supabase
-        .from('fighters')
-        .select('id')
-        .eq('tournament_id', dbTournament.id)
-        .eq('fighter_name', f.Fighter)
-        .maybeSingle();
+        .from('fighters').select('id').eq('tournament_id', dbTournament.id).eq('fighter_name', f.Fighter).maybeSingle();
 
-      // Рассчитываем Total Damage на сервере
       const totalDamage = calculateBaseDamage({
-        Kd: f.Kd || 0,
-        Td: f.Td || 0,
-        Sub: f.Sub || 0,
-        Head: f.Head || 0,
-        Body: f.Body || 0,
-        Leg: f.Leg || 0,
-        'W/L': f['W/L'] || 'lose',
-        Method: f.Method || '',
+        Kd: f.Kd || 0, Td: f.Td || 0, Sub: f.Sub || 0,
+        Head: f.Head || 0, Body: f.Body || 0, Leg: f.Leg || 0,
+        'W/L': f['W/L'] || 'lose', Method: f.Method || '',
         weight_class: f['Weight class'] || ''
       });
 
       const fighterData = {
-        tournament_id: dbTournament.id,
-        fighter_name: f.Fighter,
-        weight_class: f['Weight class'],
-        fight_id: safeNumber(f.Fight_ID),
-        wl: f['W/L']?.toLowerCase() || null,
-        total_damage: totalDamage,
-        method: f.Method || '',
-        round: safeNumber(f.Round),
-        time: f.Time || '',
-        str: safeNumber(f.Str),
-        td: safeNumber(f.Td),
-        sub: safeNumber(f.Sub),
-        head: safeNumber(f.Head),
-        body: safeNumber(f.Body),
-        leg: safeNumber(f.Leg),
-        kd: safeNumber(f.Kd)
+        tournament_id: dbTournament.id, fighter_name: f.Fighter, weight_class: f['Weight class'],
+        fight_id: safeNumber(f.Fight_ID), wl: f['W/L']?.toLowerCase() || null,
+        total_damage: totalDamage, method: f.Method || '',
+        round: safeNumber(f.Round), time: f.Time || '',
+        str: safeNumber(f.Str), td: safeNumber(f.Td), sub: safeNumber(f.Sub),
+        head: safeNumber(f.Head), body: safeNumber(f.Body), leg: safeNumber(f.Leg), kd: safeNumber(f.Kd)
       };
 
       if (existing) {
-        const { error } = await supabase
-          .from('fighters')
-          .update(fighterData)
-          .eq('id', existing.id);
+        const { error } = await supabase.from('fighters').update(fighterData).eq('id', existing.id);
         if (!error) insertedCount++;
       } else {
-        const { error } = await supabase
-          .from('fighters')
-          .insert([fighterData]);
+        const { error } = await supabase.from('fighters').insert([fighterData]);
         if (!error) insertedCount++;
       }
     }
     console.log(`✅ Inserted/updated ${insertedCount} fighters`);
 
-    // ===== НОВОЕ: Обработка замен бойцов для ВСЕХ турниров (не только completed) =====
+    // Обработка замен бойцов
     console.log('🔍 Checking for fighter replacements...');
     const { data: activeBets, error: betsError } = await supabase
-      .from('bets')
-      .select('*')
-      .eq('tournament_id', dbTournament.id)
-      .eq('cancelled', false);
+      .from('bets').select('*').eq('tournament_id', dbTournament.id).eq('cancelled', false);
 
     if (betsError) {
       console.error('Error loading active bets:', betsError);
     } else if (activeBets && activeBets.length > 0) {
       for (const bet of activeBets) {
-        // Пропускаем уже обработанные ставки (с rewards_created)
         if (bet.rewards_created) continue;
-        
         const selections = bet.selections;
         let hasReplacement = false;
         const replacedFighters = [];
-
         for (const sel of selections) {
           const fighterExists = fighters.find(f => f.Fighter === sel.fighter.Fighter);
           if (!fighterExists) {
             hasReplacement = true;
-            replacedFighters.push({
-              originalFighter: sel.fighter.Fighter,
-              weightClass: sel.weightClass
-            });
+            replacedFighters.push({ originalFighter: sel.fighter.Fighter, weightClass: sel.weightClass });
           }
         }
-
         if (hasReplacement) {
-          console.log(`  ⚠️ Bet ${bet.id} has ${replacedFighters.length} replaced fighter(s):`, replacedFighters.map(f => f.originalFighter).join(', '));
-          
+          console.log(`  ⚠️ Bet ${bet.id} has ${replacedFighters.length} replaced fighter(s)`);
           await supabase.from('bets').update({ cancelled: true }).eq('id', bet.id);
-          
           await supabase.from('notifications').insert({
-            user_id: bet.user_id,
-            type: 'bet_cancelled',
-            tournament_name: dbTournament.name,
-            data: {
-              refundAmount: bet.bet_amount,
-              cancelledFighters: replacedFighters,
-              message: 'Fighter(s) have been replaced. Please make a new bet.'
-            }
+            user_id: bet.user_id, type: 'bet_cancelled', tournament_name: dbTournament.name,
+            data: { refundAmount: bet.bet_amount, cancelledFighters: replacedFighters, message: 'Fighter(s) have been replaced. Please make a new bet.' }
           });
-          
           console.log(`  ✅ Bet ${bet.id} cancelled, refund: ${bet.bet_amount} coins`);
         }
       }
@@ -685,85 +551,41 @@ app.post('/api/tournaments/sync', async (req, res) => {
     if (is_completed) {
       console.log('🏁 Tournament completed, processing bets...');
       const { data: completedBets } = await supabase
-        .from('bets').select('*')
-        .eq('tournament_id', dbTournament.id)
-        .eq('cancelled', false);
+        .from('bets').select('*').eq('tournament_id', dbTournament.id).eq('cancelled', false);
 
       for (const bet of completedBets) {
         if (bet.rewards_created) continue;
-
         const selections = bet.selections;
-        let winners = 0;
-        let totalDamage = 0;
+        let winners = 0, totalDamage = 0;
         const updatedSelections = [];
-
         for (const sel of selections) {
           const fighterData = fighters.find(f => f.Fighter === sel.fighter.Fighter);
           if (fighterData) {
             const newTotalDamage = calculateBaseDamage({
-              Kd: fighterData.Kd || 0,
-              Td: fighterData.Td || 0,
-              Sub: fighterData.Sub || 0,
-              Head: fighterData.Head || 0,
-              Body: fighterData.Body || 0,
-              Leg: fighterData.Leg || 0,
-              'W/L': fighterData['W/L'] || 'lose',
-              Method: fighterData.Method || '',
+              Kd: fighterData.Kd || 0, Td: fighterData.Td || 0, Sub: fighterData.Sub || 0,
+              Head: fighterData.Head || 0, Body: fighterData.Body || 0, Leg: fighterData.Leg || 0,
+              'W/L': fighterData['W/L'] || 'lose', Method: fighterData.Method || '',
               weight_class: fighterData['Weight class'] || ''
             });
-
-            const enriched = {
-              ...sel,
-              fighter: {
-                ...sel.fighter,
-                'W/L': fighterData['W/L']?.toLowerCase(),
-                'Total Damage': newTotalDamage,
-                Method: fighterData.Method,
-                Round: fighterData.Round,
-                Time: fighterData.Time,
-                Str: fighterData.Str,
-                Td: fighterData.Td,
-                Sub: fighterData.Sub
-              }
-            };
-            updatedSelections.push(enriched);
+            updatedSelections.push({ ...sel, fighter: { ...sel.fighter, 'W/L': fighterData['W/L']?.toLowerCase(), 'Total Damage': newTotalDamage, Method: fighterData.Method, Round: fighterData.Round, Time: fighterData.Time, Str: fighterData.Str, Td: fighterData.Td, Sub: fighterData.Sub } });
             totalDamage += newTotalDamage;
             if (fighterData['W/L']?.toLowerCase() === 'win') winners++;
           }
         }
-
         if (updatedSelections.length === 5) {
           const coins = winners * Math.floor(bet.bet_amount * 2 / 5);
           const exp = winners * 5;
           const tickets = winners;
-
           await supabase.from('notifications').insert({
-            user_id: bet.user_id,
-            type: 'tournament_reward',
-            tournament_name: dbTournament.name,
+            user_id: bet.user_id, type: 'tournament_reward', tournament_name: dbTournament.name,
             data: { coins, tickets, experience: exp, winners: updatedSelections.filter(s => s.fighter['W/L'] === 'win'), allSelections: updatedSelections }
           });
-
-          await supabase.from('bets').update({
-            total_damage: totalDamage,
-            reward_coins: coins,
-            reward_exp: exp,
-            selections: updatedSelections,
-            rewards_created: true
-          }).eq('id', bet.id);
+          await supabase.from('bets').update({ total_damage: totalDamage, reward_coins: coins, reward_exp: exp, selections: updatedSelections, rewards_created: true }).eq('id', bet.id);
         } else {
           await supabase.from('bets').update({ cancelled: true }).eq('id', bet.id);
           await supabase.from('notifications').insert({
-            user_id: bet.user_id,
-            type: 'bet_cancelled',
-            tournament_name: dbTournament.name,
-            data: {
-              refundAmount: bet.bet_amount,
-              cancelledFighters: selections.filter(s => !fighters.find(f => f.Fighter === s.fighter.Fighter)).map(s => ({
-                originalFighter: s.fighter.Fighter,
-                weightClass: s.weightClass
-              }))
-            }
+            user_id: bet.user_id, type: 'bet_cancelled', tournament_name: dbTournament.name,
+            data: { refundAmount: bet.bet_amount, cancelledFighters: selections.filter(s => !fighters.find(f => f.Fighter === s.fighter.Fighter)).map(s => ({ originalFighter: s.fighter.Fighter, weightClass: s.weightClass })) }
           });
         }
       }
@@ -776,94 +598,52 @@ app.post('/api/tournaments/sync', async (req, res) => {
   }
 });
 
-// Пересчёт урона по имени турнира (вызывается парсером)
+// Пересчёт урона по имени турнира
 app.post('/api/tournaments/recalculate', async (req, res) => {
   try {
     const { tournament_name } = req.body;
-
-    if (!tournament_name) {
-      return res.status(400).json({ error: 'tournament_name is required' });
-    }
+    if (!tournament_name) return res.status(400).json({ error: 'tournament_name is required' });
 
     console.log(`🔄 Recalculate requested for: "${tournament_name}"`);
-
     const { data: tournament, error: findError } = await supabase
-      .from('tournaments')
-      .select('id')
-      .eq('name', tournament_name)
-      .single();
-
-    if (findError || !tournament) {
-      console.log(`❌ Tournament not found: "${tournament_name}"`);
-      return res.status(404).json({ error: 'Tournament not found' });
-    }
+      .from('tournaments').select('id').eq('name', tournament_name).single();
+    if (findError || !tournament) return res.status(404).json({ error: 'Tournament not found' });
 
     const tournamentId = tournament.id;
-    console.log(`📋 Found tournament id=${tournamentId}`);
-
     const { data: fighters, error: fightersError } = await supabase
-      .from('fighters')
-      .select('*')
-      .eq('tournament_id', tournamentId);
-
+      .from('fighters').select('*').eq('tournament_id', tournamentId);
     if (fightersError) throw fightersError;
 
     let updatedCount = 0;
     for (const fighter of fighters) {
       const newTotalDamage = calculateBaseDamage({
-        Kd: fighter.kd,
-        Td: fighter.td,
-        Sub: fighter.sub,
-        Head: fighter.head,
-        Body: fighter.body,
-        Leg: fighter.leg,
-        'W/L': fighter.wl || 'lose',
-        Method: fighter.method || '',
+        Kd: fighter.kd, Td: fighter.td, Sub: fighter.sub,
+        Head: fighter.head, Body: fighter.body, Leg: fighter.leg,
+        'W/L': fighter.wl || 'lose', Method: fighter.method || '',
         weight_class: fighter.weight_class || ''
       });
-
       const { error: updateError } = await supabase
-        .from('fighters')
-        .update({ total_damage: newTotalDamage })
-        .eq('id', fighter.id);
-
+        .from('fighters').update({ total_damage: newTotalDamage }).eq('id', fighter.id);
       if (!updateError) updatedCount++;
     }
-
     console.log(`✅ Recalculated ${updatedCount}/${fighters.length} fighters`);
 
     const { data: bets } = await supabase
-      .from('bets')
-      .select('id, selections')
-      .eq('tournament_id', tournamentId)
-      .eq('cancelled', false);
-
+      .from('bets').select('id, selections').eq('tournament_id', tournamentId).eq('cancelled', false);
     for (const bet of bets) {
       const selections = bet.selections;
       let newTotalDamage = 0;
       const updatedSelections = [];
-
       for (const sel of selections) {
         const fighterData = fighters.find(f => f.fighter_name === sel.fighter.Fighter);
         if (fighterData) {
           const newFighterDamage = fighterData.total_damage;
           newTotalDamage += newFighterDamage;
-
-          updatedSelections.push({
-            ...sel,
-            fighter: {
-              ...sel.fighter,
-              'Total Damage': newFighterDamage
-            }
-          });
+          updatedSelections.push({ ...sel, fighter: { ...sel.fighter, 'Total Damage': newFighterDamage } });
         }
       }
-
       if (updatedSelections.length === 5) {
-        await supabase
-          .from('bets')
-          .update({ total_damage: newTotalDamage, selections: updatedSelections })
-          .eq('id', bet.id);
+        await supabase.from('bets').update({ total_damage: newTotalDamage, selections: updatedSelections }).eq('id', bet.id);
       }
     }
 
@@ -874,77 +654,45 @@ app.post('/api/tournaments/recalculate', async (req, res) => {
   }
 });
 
-// ---------- ПЕРЕСЧЁТ УРОНА ДЛЯ ВСЕХ БОЙЦОВ ТУРНИРА ----------
 app.post('/api/tournaments/:id/recalculate', async (req, res) => {
   try {
     const tournamentId = parseInt(req.params.id);
     if (isNaN(tournamentId)) return res.status(400).json({ error: 'Invalid tournament id' });
 
-    console.log(`🔄 Recalculating damage for tournament ${tournamentId}...`);
-
     const { data: fighters, error: fightersError } = await supabase
-      .from('fighters')
-      .select('*')
-      .eq('tournament_id', tournamentId);
-
+      .from('fighters').select('*').eq('tournament_id', tournamentId);
     if (fightersError) throw fightersError;
 
     let updatedCount = 0;
     for (const fighter of fighters) {
       const newTotalDamage = calculateBaseDamage({
-        Kd: fighter.kd,
-        Td: fighter.td,
-        Sub: fighter.sub,
-        Head: fighter.head,
-        Body: fighter.body,
-        Leg: fighter.leg,
-        'W/L': fighter.wl || 'lose',
-        Method: fighter.method || '',
+        Kd: fighter.kd, Td: fighter.td, Sub: fighter.sub,
+        Head: fighter.head, Body: fighter.body, Leg: fighter.leg,
+        'W/L': fighter.wl || 'lose', Method: fighter.method || '',
         weight_class: fighter.weight_class || ''
       });
-
       const { error: updateError } = await supabase
-        .from('fighters')
-        .update({ total_damage: newTotalDamage })
-        .eq('id', fighter.id);
-
+        .from('fighters').update({ total_damage: newTotalDamage }).eq('id', fighter.id);
       if (!updateError) updatedCount++;
     }
-
     console.log(`✅ Recalculated ${updatedCount}/${fighters.length} fighters`);
 
     const { data: bets } = await supabase
-      .from('bets')
-      .select('id, selections')
-      .eq('tournament_id', tournamentId)
-      .eq('cancelled', false);
-
+      .from('bets').select('id, selections').eq('tournament_id', tournamentId).eq('cancelled', false);
     for (const bet of bets) {
       const selections = bet.selections;
       let newTotalDamage = 0;
       const updatedSelections = [];
-
       for (const sel of selections) {
         const fighterData = fighters.find(f => f.fighter_name === sel.fighter.Fighter);
         if (fighterData) {
           const newFighterDamage = fighterData.total_damage;
           newTotalDamage += newFighterDamage;
-
-          updatedSelections.push({
-            ...sel,
-            fighter: {
-              ...sel.fighter,
-              'Total Damage': newFighterDamage
-            }
-          });
+          updatedSelections.push({ ...sel, fighter: { ...sel.fighter, 'Total Damage': newFighterDamage } });
         }
       }
-
       if (updatedSelections.length === 5) {
-        await supabase
-          .from('bets')
-          .update({ total_damage: newTotalDamage, selections: updatedSelections })
-          .eq('id', bet.id);
+        await supabase.from('bets').update({ total_damage: newTotalDamage, selections: updatedSelections }).eq('id', bet.id);
       }
     }
 
@@ -955,7 +703,7 @@ app.post('/api/tournaments/:id/recalculate', async (req, res) => {
   }
 });
 
-// ---------- ФУНКЦИЯ ОПРЕДЕЛЕНИЯ СТИЛЯ БОЙЦА ----------
+// ---------- ФУНКЦИИ ----------
 function getFighterStyle(str, td, sub) {
   const tdSubSum = td + sub;
   if (tdSubSum >= 2 && str < 50) return 'grappler';
@@ -964,7 +712,6 @@ function getFighterStyle(str, td, sub) {
   return 'simple';
 }
 
-// ---------- ФУНКЦИЯ РАСЧЁТА БАЗОВОГО УРОНА (использует коэффициенты из БД) ----------
 function calculateBaseDamage(fighterData, customHeadCoef = null, customBodyCoef = null, customLegCoef = null) {
   const kd = safeNumber(fighterData.Kd || fighterData.kd);
   const td = safeNumber(fighterData.Td || fighterData.td);
@@ -976,12 +723,10 @@ function calculateBaseDamage(fighterData, customHeadCoef = null, customBodyCoef 
   const method = (fighterData.Method || fighterData.method || '').toUpperCase();
   const weightClass = fighterData.weight_class || fighterData['Weight class'] || '';
   
-  // Если нет детальных данных — возвращаем готовый Total Damage
   if (head === 0 && body === 0 && leg === 0 && kd === 0 && td === 0 && sub === 0) {
     return safeNumber(fighterData['Total Damage'] || fighterData.total_damage);
   }
   
-  // Коэффициенты из БД
   const KD_COEF = getCoef('KD_COEF') || 25.0;
   const TD_COEF = getCoef('TD_COEF') || 10.0;
   const SUB_COEF = getCoef('SUB_COEF') || 15.0;
@@ -994,19 +739,12 @@ function calculateBaseDamage(fighterData, customHeadCoef = null, customBodyCoef 
   const KD_BONUS_WIN = getCoef('KD_BONUS_WIN') || 40.0;
   const SUB_BONUS_WIN = getCoef('SUB_BONUS_WIN') || 35.0;
   
-  // Бонусы за способ завершения
-  let kdBonus = 0;
-  let subBonus = 0;
-  
+  let kdBonus = 0, subBonus = 0;
   if (wl === 'win') {
-    if (method.includes('KO') || method.includes('TKO')) {
-      kdBonus = KD_BONUS_WIN;
-    } else if (method.includes('SUB')) {
-      subBonus = SUB_BONUS_WIN;
-    }
+    if (method.includes('KO') || method.includes('TKO')) kdBonus = KD_BONUS_WIN;
+    else if (method.includes('SUB')) subBonus = SUB_BONUS_WIN;
   }
   
-  // Коэффициент результата
   let wkCoef = LOSE_COEF;
   if (wl === 'win') wkCoef = WIN_COEF;
   else if (wl === 'draw') wkCoef = DRAW_COEF;
@@ -1014,51 +752,37 @@ function calculateBaseDamage(fighterData, customHeadCoef = null, customBodyCoef 
   const headCoef = customHeadCoef !== null ? customHeadCoef : HEAD_COEF;
   const bodyCoef = customBodyCoef !== null ? customBodyCoef : BODY_COEF;
   const legCoef = customLegCoef !== null ? customLegCoef : LEG_COEF;
-  
-  // Весовой коэффициент из БД
   const weightCoef = getWeightCoefficient(weightClass);
   
-  const total = (
-    kd * KD_COEF + kdBonus +
-    td * TD_COEF +
-    sub * SUB_COEF + subBonus +
-    head * headCoef +
-    body * bodyCoef +
-    leg * legCoef
-  ) * wkCoef * weightCoef;
-  
+  const total = (kd * KD_COEF + kdBonus + td * TD_COEF + sub * SUB_COEF + subBonus + head * headCoef + body * bodyCoef + leg * legCoef) * wkCoef * weightCoef;
   return Math.round(total);
 }
 
-// ---------- ФУНКЦИЯ ПРИМЕНЕНИЯ PASSIVE СПОСОБНОСТЕЙ ----------
+// НОВАЯ ФУНКЦИЯ applyPassiveAbilities
 function applyPassiveAbilities(cards, userAbilities, fightersData) {
   if (!userAbilities || userAbilities.length === 0) {
     return { cards, healthBonus: 0 };
   }
   
-  let healthBonus = 0;
-  
-  const bonuses = {
-    strikerDamageBonus: 0,
-    headDamageBonus: 0,
-    grapplerDamageBonus: 0,
+  const skillBonuses = {
+    HEAD_COEF: 0,
+    STYLE_STRIKER: 0,
+    STYLE_GRAPPLER: 0,
     healthBonus: 0
   };
   
   userAbilities.forEach(ability => {
     if (ability.type === 'passive' && ability.level_data) {
       const data = ability.level_data;
-      
-      if (data.striker_damage_bonus) bonuses.strikerDamageBonus += data.striker_damage_bonus;
-      if (data.head_damage_bonus) bonuses.headDamageBonus += data.head_damage_bonus;
-      if (data.grappler_damage_bonus) bonuses.grapplerDamageBonus += data.grappler_damage_bonus;
-      if (data.health_bonus) bonuses.healthBonus += data.health_bonus;
+      if (data.striker_damage_bonus) skillBonuses.STYLE_STRIKER += data.striker_damage_bonus;
+      if (data.grappler_damage_bonus) skillBonuses.STYLE_GRAPPLER += data.grappler_damage_bonus;
+      if (data.head_damage_bonus) skillBonuses.HEAD_COEF += data.head_damage_bonus;
+      if (data.health_bonus) skillBonuses.healthBonus += data.health_bonus;
     }
   });
   
   const modifiedCards = cards.map(selection => {
     const fighter = { ...selection.fighter };
-    
     const str = safeNumber(fighter.Str);
     const td = safeNumber(fighter.Td);
     const sub = safeNumber(fighter.Sub);
@@ -1066,49 +790,82 @@ function applyPassiveAbilities(cards, userAbilities, fightersData) {
     
     const fullFighterData = fightersData?.find(f => f.fighter_name === fighter.Fighter) || fighter;
     
-    const baseTotalDamage = calculateBaseDamage(fullFighterData);
-    
-    let customHeadCoef = null;
-    
-    if (bonuses.headDamageBonus > 0) {
-      const HEAD_COEF = getCoef('HEAD_COEF') || 1.0;
-      customHeadCoef = HEAD_COEF * (1 + bonuses.headDamageBonus / 100);
+    if (!fullFighterData || (safeNumber(fullFighterData.Head || fullFighterData.head) === 0 && 
+        safeNumber(fullFighterData.Body || fullFighterData.body) === 0 && 
+        safeNumber(fullFighterData.Leg || fullFighterData.leg) === 0)) {
+      return selection;
     }
     
-    let totalDamage = calculateBaseDamage(fullFighterData, customHeadCoef);
+    const kd = safeNumber(fullFighterData.Kd || fullFighterData.kd);
+    const fighterTd = safeNumber(fullFighterData.Td || fullFighterData.td);
+    const fighterSub = safeNumber(fullFighterData.Sub || fullFighterData.sub);
+    const head = safeNumber(fullFighterData.Head || fullFighterData.head);
+    const body = safeNumber(fullFighterData.Body || fullFighterData.body);
+    const leg = safeNumber(fullFighterData.Leg || fullFighterData.leg);
+    const wl = (fullFighterData['W/L'] || fullFighterData.wl || 'lose').toLowerCase();
+    const method = (fullFighterData.Method || fullFighterData.method || '').toUpperCase();
+    const weightClass = fullFighterData.weight_class || fullFighterData['Weight class'] || '';
     
-    if (fighterStyle === 'striker' && bonuses.strikerDamageBonus > 0) {
-      totalDamage = Math.round(totalDamage * (1 + bonuses.strikerDamageBonus / 100));
-    } else if (fighterStyle === 'grappler' && bonuses.grapplerDamageBonus > 0) {
-      totalDamage = Math.round(totalDamage * (1 + bonuses.grapplerDamageBonus / 100));
-    } else if (fighterStyle === 'universal' && (bonuses.strikerDamageBonus > 0 || bonuses.grapplerDamageBonus > 0)) {
-      const halfStriker = (bonuses.strikerDamageBonus || 0) / 2;
-      const halfGrappler = (bonuses.grapplerDamageBonus || 0) / 2;
-      const totalBonus = halfStriker + halfGrappler;
-      totalDamage = Math.round(totalDamage * (1 + totalBonus / 100));
+    // PvP HEAD_COEF
+    const baseHeadCoef = getCoef('HEAD_COEF') || 1.0;
+    const PvPHeadCoef = baseHeadCoef * (1 + skillBonuses.HEAD_COEF / 100);
+    
+    // Бонусы за завершение
+    const baseKDBonus = getCoef('KD_BONUS_WIN') || 40.0;
+    const baseSUBBonus = getCoef('SUB_BONUS_WIN') || 35.0;
+    let PvPKdBonus = 0, PvPSubBonus = 0;
+    if (wl === 'win') {
+      if (method.includes('KO') || method.includes('TKO')) PvPKdBonus = baseKDBonus;
+      else if (method.includes('SUB')) PvPSubBonus = baseSUBBonus;
     }
+    
+    // Коэффициент результата
+    const baseWinCoef = getCoef('WIN_COEF') || 1.0;
+    const baseLoseCoef = getCoef('LOSE_COEF') || 0.7;
+    const baseDrawCoef = getCoef('DRAW_COEF') || 0.9;
+    let PvPWkCoef = baseLoseCoef;
+    if (wl === 'win') PvPWkCoef = baseWinCoef;
+    else if (wl === 'draw') PvPWkCoef = baseDrawCoef;
+    
+    // Весовой коэффициент
+    const PvPWeightCoef = getWeightCoefficient(weightClass);
+    
+    // Стилевой коэффициент
+    let PvPStyleCoef = 1.0;
+    if (fighterStyle === 'striker') {
+      PvPStyleCoef = 1 + skillBonuses.STYLE_STRIKER / 100;
+    } else if (fighterStyle === 'grappler') {
+      PvPStyleCoef = 1 + skillBonuses.STYLE_GRAPPLER / 100;
+    } else if (fighterStyle === 'universal') {
+      PvPStyleCoef = 1 + (skillBonuses.STYLE_STRIKER + skillBonuses.STYLE_GRAPPLER) / 100;
+    }
+    
+    const PvPTotal = Math.round((
+      kd * (getCoef('KD_COEF') || 25.0) + PvPKdBonus +
+      fighterTd * (getCoef('TD_COEF') || 10.0) +
+      fighterSub * (getCoef('SUB_COEF') || 15.0) + PvPSubBonus +
+      head * PvPHeadCoef +
+      body * (getCoef('BODY_COEF') || 0.9) +
+      leg * (getCoef('LEG_COEF') || 0.8)
+    ) * PvPWkCoef * PvPWeightCoef * PvPStyleCoef);
     
     return {
       ...selection,
       fighter: {
         ...fighter,
-        'Total Damage': totalDamage,
-        'Head': safeNumber(fullFighterData.Head || fullFighterData.head),
-        'Body': safeNumber(fullFighterData.Body || fullFighterData.body),
-        'Leg': safeNumber(fullFighterData.Leg || fullFighterData.leg)
+        'Total Damage': PvPTotal,
+        'Head': head,
+        'Body': body,
+        'Leg': leg
       }
     };
   });
   
-  healthBonus = bonuses.healthBonus;
-  
-  return { cards: modifiedCards, healthBonus };
+  return { cards: modifiedCards, healthBonus: skillBonuses.healthBonus };
 }
 
-// ---------- ФУНКЦИЯ ГЕНЕРАЦИИ СЦЕНАРИЯ БОЯ ----------
 function calculateBattleScript(userCards, rivalCards, allTournamentWeightClasses, userHealthBonus = 0, rivalHealthBonus = 0) {
   const events = [];
-  
   const baseHealth = 1000;
   let currentUserHealth = baseHealth + Math.round(baseHealth * (userHealthBonus / 100));
   let currentRivalHealth = baseHealth + Math.round(baseHealth * (rivalHealthBonus / 100));
@@ -1116,16 +873,13 @@ function calculateBattleScript(userCards, rivalCards, allTournamentWeightClasses
   console.log(`❤️ User health: ${currentUserHealth} (base: ${baseHealth}, bonus: ${userHealthBonus}%)`);
   console.log(`❤️ Rival health: ${currentRivalHealth} (base: ${baseHealth}, bonus: ${rivalHealthBonus}%)`);
   
-  let currentUserCards = [];
-  let currentRivalCards = [];
-  let availableClasses = [...allTournamentWeightClasses];
-  let usedClasses = [];
+  let currentUserCards = [], currentRivalCards = [];
+  let availableClasses = [...allTournamentWeightClasses], usedClasses = [];
 
   events.push({ type: 'countdown' });
 
   for (let round = 1; round <= 5; round++) {
     events.push({ type: 'round-start', round });
-
     if (availableClasses.length === 0) break;
 
     const randomIndex = Math.floor(Math.random() * availableClasses.length);
@@ -1133,12 +887,8 @@ function calculateBattleScript(userCards, rivalCards, allTournamentWeightClasses
     usedClasses.push(selectedClass);
     availableClasses = availableClasses.filter((_, i) => i !== randomIndex);
 
-    const newUserFighters = userCards.filter(
-      sel => sel.weightClass === selectedClass && !currentUserCards.some(c => c.fighter.Fighter === sel.fighter.Fighter)
-    );
-    const newRivalFighters = rivalCards.filter(
-      sel => sel.weightClass === selectedClass && !currentRivalCards.some(c => c.fighter.Fighter === sel.fighter.Fighter)
-    );
+    const newUserFighters = userCards.filter(sel => sel.weightClass === selectedClass && !currentUserCards.some(c => c.fighter.Fighter === sel.fighter.Fighter));
+    const newRivalFighters = rivalCards.filter(sel => sel.weightClass === selectedClass && !currentRivalCards.some(c => c.fighter.Fighter === sel.fighter.Fighter));
 
     const userSlots = 5 - currentUserCards.length;
     const userCardsToAdd = newUserFighters.slice(0, userSlots);
@@ -1149,9 +899,7 @@ function calculateBattleScript(userCards, rivalCards, allTournamentWeightClasses
     if (rivalCardsToAdd.length > 0) currentRivalCards = [...currentRivalCards, ...rivalCardsToAdd];
 
     events.push({
-      type: 'card-appear',
-      round,
-      weightClass: selectedClass,
+      type: 'card-appear', round, weightClass: selectedClass,
       userActiveCards: currentUserCards.map(c => ({ ...c, fighter: { ...c.fighter } })),
       rivalActiveCards: currentRivalCards.map(c => ({ ...c, fighter: { ...c.fighter } }))
     });
@@ -1162,14 +910,7 @@ function calculateBattleScript(userCards, rivalCards, allTournamentWeightClasses
     currentRivalHealth = Math.max(0, currentRivalHealth - userTotalDamage);
     currentUserHealth = Math.max(0, currentUserHealth - rivalTotalDamage);
 
-    events.push({
-      type: 'damage',
-      round,
-      userDamage: userTotalDamage,
-      rivalDamage: rivalTotalDamage,
-      userHealthAfter: currentUserHealth,
-      rivalHealthAfter: currentRivalHealth
-    });
+    events.push({ type: 'damage', round, userDamage: userTotalDamage, rivalDamage: rivalTotalDamage, userHealthAfter: currentUserHealth, rivalHealthAfter: currentRivalHealth });
 
     if (currentRivalHealth <= 0 && currentUserHealth > 0) {
       events.push({ type: 'battle-end', result: { isOpen: true, result: 'win', resultType: 'ko' } });
@@ -1183,19 +924,14 @@ function calculateBattleScript(userCards, rivalCards, allTournamentWeightClasses
       events.push({ type: 'battle-end', result: { isOpen: true, result: 'draw' } });
       return { events, winningRound: round };
     }
-
     if (round < 5) events.push({ type: 'round-end', round });
   }
 
   const healthDiff = Math.abs(currentUserHealth - currentRivalHealth);
   let result;
-  if (currentUserHealth > currentRivalHealth) {
-    result = { isOpen: true, result: 'win', resultType: healthDiff >= 100 ? 'decision-unanimous' : 'decision-split' };
-  } else if (currentRivalHealth > currentUserHealth) {
-    result = { isOpen: true, result: 'loss', resultType: healthDiff >= 100 ? 'decision-unanimous' : 'decision-split' };
-  } else {
-    result = { isOpen: true, result: 'draw' };
-  }
+  if (currentUserHealth > currentRivalHealth) result = { isOpen: true, result: 'win', resultType: healthDiff >= 100 ? 'decision-unanimous' : 'decision-split' };
+  else if (currentRivalHealth > currentUserHealth) result = { isOpen: true, result: 'loss', resultType: healthDiff >= 100 ? 'decision-unanimous' : 'decision-split' };
+  else result = { isOpen: true, result: 'draw' };
   events.push({ type: 'battle-end', result });
   return { events, winningRound: 5 };
 }
@@ -1209,82 +945,41 @@ app.post('/api/pvp/start', authenticate, async (req, res) => {
     console.log(`🎮 PvP start: userId=${userId}, tournamentId=${tournamentId}, betAmount=${betAmount}`);
 
     const { data: userBet, error: betError } = await supabase
-      .from('bets')
-      .select('total_damage, selections')
-      .eq('user_id', userId)
-      .eq('tournament_id', tournamentId)
-      .eq('cancelled', false)
-      .single();
-    if (betError) {
-      console.error('❌ User bet error:', betError);
-      return res.status(400).json({ error: 'No valid bet found for this tournament' });
-    }
+      .from('bets').select('total_damage, selections')
+      .eq('user_id', userId).eq('tournament_id', tournamentId).eq('cancelled', false).single();
+    if (betError) return res.status(400).json({ error: 'No valid bet found for this tournament' });
 
     const { data: user, error: userError } = await supabase
-      .from('users')
-      .select('coins, tickets')
-      .eq('id', userId)
-      .single();
+      .from('users').select('coins, tickets').eq('id', userId).single();
     if (userError) throw userError;
-    if (user.coins < betAmount || user.tickets < 1) {
-      return res.status(400).json({ error: 'Not enough coins or tickets' });
-    }
+    if (user.coins < betAmount || user.tickets < 1) return res.status(400).json({ error: 'Not enough coins or tickets' });
 
-    await supabase.from('users')
-      .update({ coins: user.coins - betAmount, tickets: user.tickets - 1 })
-      .eq('id', userId);
+    await supabase.from('users').update({ coins: user.coins - betAmount, tickets: user.tickets - 1 }).eq('id', userId);
 
     const { data: userAbilitiesData } = await supabase
-      .from('user_abilities')
-      .select(`
-        ability_id,
-        current_level,
-        abilities!inner (
-          id,
-          name,
-          style,
-          type,
-          max_level
-        )
-      `)
-      .eq('user_id', userId)
-      .gt('current_level', 0);
+      .from('user_abilities').select(`ability_id, current_level, abilities!inner (id, name, style, type, max_level)`)
+      .eq('user_id', userId).gt('current_level', 0);
     
     let userAbilities = [];
     if (userAbilitiesData && userAbilitiesData.length > 0) {
       const abilityIds = userAbilitiesData.map(ua => ua.ability_id);
-      const { data: levels } = await supabase
-        .from('ability_levels')
-        .select('*')
-        .in('ability_id', abilityIds);
-      
+      const { data: levels } = await supabase.from('ability_levels').select('*').in('ability_id', abilityIds);
       userAbilities = userAbilitiesData.map(ua => ({
-        ...ua.abilities,
-        current_level: ua.current_level,
+        ...ua.abilities, current_level: ua.current_level,
         level_data: levels?.find(l => l.ability_id === ua.ability_id && l.level === ua.current_level) || null
       }));
     }
-    
-    console.log(`🎯 User abilities: ${userAbilities.length}`);
 
     const { data: tournamentFighters } = await supabase
-      .from('fighters')
-      .select('weight_class')
-      .eq('tournament_id', tournamentId);
-    
+      .from('fighters').select('weight_class').eq('tournament_id', tournamentId);
     const allWeightClasses = [...new Set(tournamentFighters.map(f => f.weight_class))];
 
     const { data: rivals } = await supabase
-      .from('bets')
-      .select('user_id, total_damage, selections')
-      .eq('tournament_id', tournamentId)
-      .eq('cancelled', false)
-      .neq('user_id', userId);
+      .from('bets').select('user_id, total_damage, selections')
+      .eq('tournament_id', tournamentId).eq('cancelled', false).neq('user_id', userId);
 
     if (!rivals || rivals.length === 0) {
-      await supabase.from('users')
-        .update({ coins: user.coins, tickets: user.tickets })
-        .eq('id', userId);
+      await supabase.from('users').update({ coins: user.coins, tickets: user.tickets }).eq('id', userId);
       return res.status(400).json({ error: 'No opponents available' });
     }
 
@@ -1297,69 +992,36 @@ app.post('/api/pvp/start', authenticate, async (req, res) => {
     }
 
     const { data: rivalProfile } = await supabase
-      .from('users')
-      .select('username, photo_url')
-      .eq('id', bestRival.user_id)
-      .single();
+      .from('users').select('username, photo_url').eq('id', bestRival.user_id).single();
 
     const { data: rivalAbilitiesData } = await supabase
-      .from('user_abilities')
-      .select(`
-        ability_id,
-        current_level,
-        abilities!inner (
-          id,
-          name,
-          style,
-          type,
-          max_level
-        )
-      `)
-      .eq('user_id', bestRival.user_id)
-      .gt('current_level', 0);
+      .from('user_abilities').select(`ability_id, current_level, abilities!inner (id, name, style, type, max_level)`)
+      .eq('user_id', bestRival.user_id).gt('current_level', 0);
     
     let rivalAbilities = [];
     if (rivalAbilitiesData && rivalAbilitiesData.length > 0) {
       const abilityIds = rivalAbilitiesData.map(ua => ua.ability_id);
-      const { data: levels } = await supabase
-        .from('ability_levels')
-        .select('*')
-        .in('ability_id', abilityIds);
-      
+      const { data: levels } = await supabase.from('ability_levels').select('*').in('ability_id', abilityIds);
       rivalAbilities = rivalAbilitiesData.map(ua => ({
-        ...ua.abilities,
-        current_level: ua.current_level,
+        ...ua.abilities, current_level: ua.current_level,
         level_data: levels?.find(l => l.ability_id === ua.ability_id && l.level === ua.current_level) || null
       }));
     }
-    
-    console.log(`🎯 Rival abilities: ${rivalAbilities.length}`);
 
     const userCards = userBet.selections;
     const rivalCards = bestRival.selections;
     
     const allFighterNames = [...userCards.map(c => c.fighter.Fighter), ...rivalCards.map(c => c.fighter.Fighter)];
     const { data: fightersData } = await supabase
-      .from('fighters')
-      .select('*')
-      .in('fighter_name', allFighterNames)
-      .eq('tournament_id', tournamentId);
+      .from('fighters').select('*').in('fighter_name', allFighterNames).eq('tournament_id', tournamentId);
     
-    const { cards: enhancedUserCards, healthBonus: userHealthBonus } = 
-      applyPassiveAbilities(userCards, userAbilities, fightersData);
-    const { cards: enhancedRivalCards, healthBonus: rivalHealthBonus } = 
-      applyPassiveAbilities(rivalCards, rivalAbilities, fightersData);
+    const { cards: enhancedUserCards, healthBonus: userHealthBonus } = applyPassiveAbilities(userCards, userAbilities, fightersData);
+    const { cards: enhancedRivalCards, healthBonus: rivalHealthBonus } = applyPassiveAbilities(rivalCards, rivalAbilities, fightersData);
 
     console.log(`💪 User health bonus: +${userHealthBonus}%`);
     console.log(`💪 Rival health bonus: +${rivalHealthBonus}%`);
 
-    const { events: battleEvents, winningRound } = calculateBattleScript(
-      enhancedUserCards, 
-      enhancedRivalCards, 
-      allWeightClasses,
-      userHealthBonus,
-      rivalHealthBonus
-    );
+    const { events: battleEvents, winningRound } = calculateBattleScript(enhancedUserCards, enhancedRivalCards, allWeightClasses, userHealthBonus, rivalHealthBonus);
 
     const lastEvent = battleEvents[battleEvents.length - 1];
     const { result, resultType } = lastEvent.result;
@@ -1369,14 +1031,10 @@ app.post('/api/pvp/start', authenticate, async (req, res) => {
       if (resultType === 'ko') baseCoeff = 2.0;
       else if (resultType === 'decision-unanimous') baseCoeff = 1.5;
       else if (resultType === 'decision-split') baseCoeff = 1.2;
-    } else if (result === 'draw') {
-      baseCoeff = 1.0;
-    }
+    } else if (result === 'draw') baseCoeff = 1.0;
 
     let winCoefficient = baseCoeff;
-    if (result === 'win' && resultType === 'ko' && winningRound < 5) {
-      winCoefficient = baseCoeff + (5 - winningRound) * 0.1;
-    }
+    if (result === 'win' && resultType === 'ko' && winningRound < 5) winCoefficient = baseCoeff + (5 - winningRound) * 0.1;
 
     console.log(`🏆 Result: ${result} ${resultType || ''}, round: ${winningRound}, coeff: ${winCoefficient}`);
 
@@ -1391,18 +1049,26 @@ app.post('/api/pvp/start', authenticate, async (req, res) => {
       expReward = 4;
     }
 
+    // Начисляем опыт ВСЕГДА (пользователю)
+    const { data: currentUserData } = await supabase
+      .from('users').select('experience, level, exp_points').eq('id', userId).single();
+    const newUserExp = currentUserData.experience + expReward;
+    const { level: userLevel, currentExp: userCurrentExp, nextLevelExp: userNextLevelExp } = calculateLevel(newUserExp);
+    let newUserExpPoints = currentUserData.exp_points;
+    if (userLevel > currentUserData.level) newUserExpPoints += (userLevel - currentUserData.level);
+    
+    await supabase.from('users')
+      .update({ experience: newUserExp, level: userLevel, exp_points: newUserExpPoints })
+      .eq('id', userId);
+
+    // Обновляем победителя (монеты + опыт)
     const winnerId = result === 'win' ? userId : (result === 'loss' ? bestRival.user_id : null);
     let updatedWinner = null;
     if (winnerId) {
       const { data: winner } = await supabase
-        .from('users')
-        .select('coins, experience, level, exp_points')
-        .eq('id', winnerId)
-        .single();
-      
+        .from('users').select('coins, experience, level, exp_points').eq('id', winnerId).single();
       const newExp = winner.experience + expReward;
       const newCoins = winner.coins + coinsReward;
-      
       const { level, currentExp, nextLevelExp } = calculateLevel(newExp);
       let newExpPoints = winner.exp_points;
       if (level > winner.level) newExpPoints += (level - winner.level);
@@ -1411,10 +1077,7 @@ app.post('/api/pvp/start', authenticate, async (req, res) => {
         .update({ coins: newCoins, experience: newExp, level: level, exp_points: newExpPoints })
         .eq('id', winnerId);
       
-      updatedWinner = {
-        userId: winnerId, coins: newCoins, totalExp: newExp,
-        level, currentExp, nextLevelExp, expPoints: newExpPoints
-      };
+      updatedWinner = { userId: winnerId, coins: newCoins, totalExp: newExp, level, currentExp, nextLevelExp, expPoints: newExpPoints };
     }
 
     await supabase.from('pvp_battles').insert({
@@ -1424,18 +1087,13 @@ app.post('/api/pvp/start', authenticate, async (req, res) => {
       rival_total_damage: enhancedRivalCards.reduce((s, c) => s + c.fighter['Total Damage'], 0)
     });
 
-    const { data: updatedUser } = await supabase
-      .from('users').select('coins, tickets').eq('id', userId).single();
+    const { data: updatedUser } = await supabase.from('users').select('coins, tickets').eq('id', userId).single();
 
     res.json({
       success: true,
       battleScript: { events: battleEvents },
       rewards: { coins: coinsReward, experience: expReward },
-      rival: {
-        username: rivalProfile?.username || 'Opponent',
-        photoUrl: rivalProfile?.photo_url,
-        selections: rivalCards
-      },
+      rival: { username: rivalProfile?.username || 'Opponent', photoUrl: rivalProfile?.photo_url, selections: rivalCards },
       healthBonuses: { user: userHealthBonus, rival: rivalHealthBonus },
       updatedBalance: { coins: updatedUser.coins, tickets: updatedUser.tickets },
       updatedWinner: updatedWinner
@@ -1451,16 +1109,11 @@ app.get('/api/abilities/:style', authenticate, async (req, res) => {
   try {
     const { style } = req.params;
     const userId = req.user.userId;
-    
     if (!['striker', 'grappler'].includes(style)) return res.status(400).json({ error: 'Invalid style' });
     
-    const { data: abilities } = await supabase
-      .from('abilities').select('*').eq('style', style)
-      .order('row_position').order('col_position');
-    
+    const { data: abilities } = await supabase.from('abilities').select('*').eq('style', style).order('row_position').order('col_position');
     const abilityIds = abilities.map(a => a.id);
-    const { data: levels } = await supabase
-      .from('ability_levels').select('*').in('ability_id', abilityIds).order('level');
+    const { data: levels } = await supabase.from('ability_levels').select('*').in('ability_id', abilityIds).order('level');
     
     const levelsByAbility = levels.reduce((acc, level) => {
       if (!acc[level.ability_id]) acc[level.ability_id] = [];
@@ -1468,13 +1121,8 @@ app.get('/api/abilities/:style', authenticate, async (req, res) => {
       return acc;
     }, {});
     
-    const abilitiesWithLevels = abilities.map(ability => ({
-      ...ability,
-      levels: levelsByAbility[ability.id] || []
-    }));
-    
-    const { data: userAbilities } = await supabase
-      .from('user_abilities').select('ability_id, current_level').eq('user_id', userId);
+    const abilitiesWithLevels = abilities.map(ability => ({ ...ability, levels: levelsByAbility[ability.id] || [] }));
+    const { data: userAbilities } = await supabase.from('user_abilities').select('ability_id, current_level').eq('user_id', userId);
     
     res.json({ abilities: abilitiesWithLevels, userAbilities: userAbilities || [] });
   } catch (err) {
@@ -1491,18 +1139,14 @@ app.post('/api/abilities/learn', authenticate, async (req, res) => {
     const { data: ability } = await supabase.from('abilities').select('*').eq('id', ability_id).single();
     if (!ability) return res.status(404).json({ error: 'Ability not found' });
     
-    const { data: levelData } = await supabase
-      .from('ability_levels').select('*').eq('ability_id', ability_id).eq('level', level).single();
+    const { data: levelData } = await supabase.from('ability_levels').select('*').eq('ability_id', ability_id).eq('level', level).single();
     if (!levelData) return res.status(404).json({ error: 'Level not found' });
     
     const { data: user } = await supabase.from('users').select('level, exp_points').eq('id', userId).single();
-    
     if (user.level < ability.min_level) return res.status(400).json({ error: 'Player level too low' });
     
     if (ability.parent_ability_id) {
-      const { data: parent } = await supabase
-        .from('user_abilities').select('current_level')
-        .eq('user_id', userId).eq('ability_id', ability.parent_ability_id).single();
+      const { data: parent } = await supabase.from('user_abilities').select('current_level').eq('user_id', userId).eq('ability_id', ability.parent_ability_id).single();
       if (!parent || parent.current_level === 0) return res.status(400).json({ error: 'Parent ability not learned' });
     }
     
@@ -1510,9 +1154,7 @@ app.post('/api/abilities/learn', authenticate, async (req, res) => {
     
     await supabase.from('users').update({ exp_points: user.exp_points - levelData.cost }).eq('id', userId);
     
-    const { data: existing } = await supabase
-      .from('user_abilities').select('id').eq('user_id', userId).eq('ability_id', ability_id).single();
-    
+    const { data: existing } = await supabase.from('user_abilities').select('id').eq('user_id', userId).eq('ability_id', ability_id).single();
     if (existing) {
       await supabase.from('user_abilities').update({ current_level: level, updated_at: new Date() }).eq('id', existing.id);
     } else {
