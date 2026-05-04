@@ -475,7 +475,7 @@ app.get('/api/leaderboard/:tournamentId', async (req, res) => {
 
     const userIds = bets.map(b => b.user_id);
     const { data: users } = await supabase
-      .from('users').select('id, username').in('id', userIds);
+  .from('users').select('id, username, style').in('id', userIds);
 
     const userMap = new Map(users.map(u => [u.id, u.username]));
 
@@ -483,6 +483,7 @@ app.get('/api/leaderboard/:tournamentId', async (req, res) => {
       rank: index + 1,
       userId: bet.user_id,
       username: userMap.get(bet.user_id) || 'Unknown',
+      style: users.find(u => u.id === bet.user_id)?.style || null,
       totalDamage: bet.total_damage,
       timestamp: bet.created_at
     }));
@@ -1301,7 +1302,7 @@ app.post('/api/pvp/start', authenticate, async (req, res) => {
     }
 
     const { data: rivalProfile } = await supabase
-      .from('users').select('username, photo_url').eq('id', bestRival.user_id).single();
+  .from('users').select('username, photo_url, style').eq('id', bestRival.user_id).single();
 
     const { data: rivalAbilitiesData } = await supabase
       .from('user_abilities').select(`ability_id, current_level, abilities!inner (id, name, style, type, max_level)`)
@@ -1426,7 +1427,7 @@ app.post('/api/pvp/start', authenticate, async (req, res) => {
       success: true,
       battleScript: { events: battleEvents },
       rewards: { coins: coinsReward, experience: expReward },
-      rival: { username: rivalProfile?.username || 'Opponent', photoUrl: rivalProfile?.photo_url, selections: rivalCards },
+      rival: { username: rivalProfile?.username || 'Opponent', photoUrl: rivalProfile?.photo_url, style: rivalProfile?.style || null, selections: rivalCards },
       healthBonuses: { user: userHealthBonus, rival: rivalHealthBonus },
       updatedBalance: { coins: updatedUser.coins, tickets: updatedUser.tickets },
       updatedWinner: updatedWinner
