@@ -1205,6 +1205,31 @@ function calculateBattleScript(userCards, rivalCards, allTournamentWeightClasses
     currentRivalHealth = Math.max(0, currentRivalHealth - finalUserDamage);
     currentUserHealth = Math.max(0, currentUserHealth - finalRivalDamage);
 
+    console.log(`📊 === ROUND ${round} SUMMARY ===`);
+console.log(`  👤 User cards (${currentUserCards.length}):`);
+currentUserCards.forEach(c => {
+  const style = getCardStyle(c);
+  console.log(`    - ${c.fighter.Fighter} (${style}) | Damage: ${c.fighter['Total Damage']}`);
+});
+console.log(`  🤖 Rival cards (${currentRivalCards.length}):`);
+currentRivalCards.forEach(c => {
+  const style = getCardStyle(c);
+  console.log(`    - ${c.fighter.Fighter} (${style}) | Damage: ${c.fighter['Total Damage']}`);
+});
+console.log(`  ⚡ User base damage: ${userTotalDamage}, Rival base damage: ${rivalTotalDamage}`);
+
+if (userCombo) {
+  console.log(`  🔥 User COMBO: ${userCombo.name} | Multiplier: ${userDamageMultiplier} | Hits: ${userHitCount}`);
+}
+if (rivalCombo) {
+  console.log(`  🔥 Rival COMBO: ${rivalCombo.name} | Multiplier: ${rivalDamageMultiplier} | Hits: ${rivalHitCount}`);
+}
+if (userBlockIncoming) console.log(`  🛡️ User BLOCKS rival damage`);
+if (rivalBlockIncoming) console.log(`  🛡️ Rival BLOCKS user damage`);
+
+console.log(`  💥 Final damage: User ${finalUserDamage} -> Rival, Rival ${finalRivalDamage} -> User`);
+console.log(`  ❤️ Health after: User ${currentUserHealth - finalRivalDamage}/${baseHealth + Math.round(baseHealth * (userHealthBonus / 100))}, Rival ${currentRivalHealth - finalUserDamage}/${baseHealth + Math.round(baseHealth * (rivalHealthBonus / 100))}`);
+
     events.push({
       type: 'damage', round,
       userDamage: finalUserDamage, rivalDamage: finalRivalDamage,
@@ -1501,5 +1526,9 @@ app.post('/api/abilities/learn', authenticate, async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
+
+
+
 
 app.listen(port, () => console.log(`Server running on port ${port}`));
