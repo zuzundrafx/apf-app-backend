@@ -1199,8 +1199,16 @@ function calculateBattleScript(userCards, rivalCards, allTournamentWeightClasses
     if (rivalBlockIncoming) { userTotalDamage = 0; userHitCount = 0; console.log('  🛡️ User damage BLOCKED by rival'); }
     if (userBlockIncoming) { rivalTotalDamage = 0; rivalHitCount = 0; console.log('  🛡️ Rival damage BLOCKED by user'); }
 
-    const finalUserDamage = Math.round(userTotalDamage * userDamageMultiplier);
-    const finalRivalDamage = Math.round(rivalTotalDamage * rivalDamageMultiplier);
+    if (userCombo) {
+      console.log(`🔥 User COMBO: ${userCombo.name} | Base: ${userTotalDamage} | Multiplier: ${userDamageMultiplier} | Hits: ${userHitCount} | Total: ${Math.round(userTotalDamage * userDamageMultiplier * userHitCount)}`);
+    }
+    if (rivalCombo) {
+      console.log(`🔥 Rival COMBO: ${rivalCombo.name} | Base: ${rivalTotalDamage} | Multiplier: ${rivalDamageMultiplier} | Hits: ${rivalHitCount} | Total: ${Math.round(rivalTotalDamage * rivalDamageMultiplier * rivalHitCount)}`);
+    }
+
+
+        const finalUserDamage = Math.round(userTotalDamage * userDamageMultiplier * userHitCount);
+    const finalRivalDamage = Math.round(rivalTotalDamage * rivalDamageMultiplier * rivalHitCount);
 
     currentRivalHealth = Math.max(0, currentRivalHealth - finalUserDamage);
     currentUserHealth = Math.max(0, currentUserHealth - finalRivalDamage);
