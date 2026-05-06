@@ -1416,26 +1416,13 @@ app.post('/api/pvp/start', authenticate, async (req, res) => {
       expReward = 4;
     }
 
-        // Начисляем опыт ВСЕГДА (пользователю, если он не победитель)
-    const winnerId = result === 'win' ? userId : (result === 'loss' ? bestRival.user_id : null);
-    
-    // Если пользователь НЕ победитель (проиграл или ничья) — начисляем опыт
-    if (userId !== winnerId) {
-      const { data: currentUserData } = await supabase
-        .from('users').select('experience, level, exp_points').eq('id', userId).single();
-      const newUserExp = currentUserData.experience + expReward;
-      const { level: userLevel, currentExp: userCurrentExp, nextLevelExp: userNextLevelExp } = calculateLevel(newUserExp);
-      let newUserExpPoints = currentUserData.exp_points;
-      if (userLevel > currentUserData.level) newUserExpPoints += (userLevel - currentUserData.level);
-      
-      await supabase.from('users')
-        .update({ experience: newUserExp, level: userLevel, exp_points: newUserExpPoints })
-        .eq('id', userId);
-    }
+        
 
-    // Обновляем победителя (монеты + опыт)
+        // Начисляем опыт и монеты
     const winnerId = result === 'win' ? userId : (result === 'loss' ? bestRival.user_id : null);
     let updatedWinner = null;
+
+    // Победитель получает монеты + опыт
     if (winnerId) {
       const { data: winner } = await supabase
         .from('users').select('coins, experience, level, exp_points').eq('id', winnerId).single();
@@ -1450,6 +1437,48 @@ app.post('/api/pvp/start', authenticate, async (req, res) => {
         .eq('id', winnerId);
       
       updatedWinner = { userId: winnerId, coins: newCoins, totalExp: newExp, level, currentExp, nextLevelExp, expPoints: newExpPoints };
+    }
+
+    // Проигравший получает ТОЛЬКО опыт (без монет)
+    const loserId = result === 'win' ? bestRival.user_id : (result === 'loss' ? userId : null);
+    if (loserId) {
+      const { data: loser } = await supabase
+        .from('users').select('experience, level, exp_points').eq('id', loserId).single();
+      const loserNewExp = loser.experience + expReward;
+      const { level: loserLevel } = calculateLevel(loserNewExp);
+      let loserNewExpPoints = loser.exp_points;
+      if (loserLevel > loser.level) loserNewExpPoints += (loserLevel - loser.level);
+      
+      await supabase.from('users')
+        .update({ experience: loserNewExp, level: loserLevel, exp_points: loserNewExpPoints })
+        .eq('id', loserId);
+    }
+
+    // При ничьей — оба получают опыт и возврат ставки
+    if (result === 'draw') {
+      const { data: currentUser } = await supabase
+        .from('users').select('coins, experience, level, exp_points').eq('id', userId).single();
+      const userNewExp = currentUser.experience + expReward;
+      const userNewCoins = currentUser.coins + coinsReward;
+      const { level: userLevel } = calculateLevel(userNewExp);
+      let userNewExpPoints = currentUser.exp_points;
+      if (userLevel > currentUser.level) userNewExpPoints += (userLevel - currentUser.level);
+      
+      await supabase.from('users')
+        .update({ coins: userNewCoins, experience: userNewExp, level: userLevel, exp_points: userNewExpPoints })
+        .eq('id', userId);
+      
+      const { data: rivalUser } = await supabase
+        .from('users').select('coins, experience, level, exp_points').eq('id', bestRival.user_id).single();
+      const rivalNewExp = rivalUser.experience + expReward;
+      const rivalNewCoins = rivalUser.coins + coinsReward;
+      const { level: rivalLevel } = calculateLevel(rivalNewExp);
+      let rivalNewExpPoints = rivalUser.exp_points;
+      if (rivalLevel > rivalUser.level) rivalNewExpPoints += (rivalLevel - rivalUser.level);
+      
+      await supabase.from('users')
+        .update({ coins: rivalNewCoins, experience: rivalNewExp, level: rivalLevel, exp_points: rivalNewExpPoints })
+        .eq('id', bestRival.user_id);
     }
 
     await supabase.from('pvp_battles').insert({
