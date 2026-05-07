@@ -1066,7 +1066,9 @@ function matchesCombo(ability, styles, requiredCount) {
   return false;
 }
 
-function checkCombo(abilities, cardHistory) {
+function checkCombo(abilities, cardHistory, comboActivated) {
+  if (comboActivated) return null;
+  
   const styles = cardHistory.map(c => c.style);
   
   if (styles.length >= 3) {
@@ -1077,8 +1079,8 @@ function checkCombo(abilities, cardHistory) {
         return {
           name: ability.name,
           damageMultiplier: ability.level_data.damage_multiplier || 1.0,
-          hitCount: 2,
-          blockIncoming: ability.name === 'Takedown Defense'
+          hitCount: ability.level_data.hit_count || 1,
+          blockIncomingPercent: ability.level_data.block_incoming || 0
         };
       }
     }
@@ -1092,8 +1094,8 @@ function checkCombo(abilities, cardHistory) {
         return {
           name: ability.name,
           damageMultiplier: ability.level_data.damage_multiplier || 1.0,
-          hitCount: 2,
-          blockIncoming: ability.name === 'Takedown Defense'
+          hitCount: ability.level_data.hit_count || 1,
+          blockIncomingPercent: ability.level_data.block_incoming || 0
         };
       }
     }
@@ -1121,6 +1123,7 @@ function calculateBattleScript(userCards, rivalCards, allTournamentWeightClasses
   let currentUserCards = [], currentRivalCards = [];
   let userCardHistory = [], rivalCardHistory = [];
   let availableClasses = [...allTournamentWeightClasses], usedClasses = [];
+  let userComboActivated = false, rivalComboActivated = false;
 
   events.push({ type: 'countdown' });
 
@@ -1141,13 +1144,14 @@ function calculateBattleScript(userCards, rivalCards, allTournamentWeightClasses
     const rivalSlots = 5 - currentRivalCards.length;
     const rivalCardsToAdd = newRivalFighters.slice(0, rivalSlots);
 
-    if (userCardsToAdd.length > 0) {
+        if (userCardsToAdd.length > 0) {
       currentUserCards = [...currentUserCards, ...userCardsToAdd];
       userCardsToAdd.forEach(c => {
         const style = getCardStyle(c);
         userCardHistory.push({ style });
         console.log(`  🃏 User card: ${c.fighter.Fighter} (${style})`);
       });
+      
     }
     if (rivalCardsToAdd.length > 0) {
       currentRivalCards = [...currentRivalCards, ...rivalCardsToAdd];
@@ -1156,6 +1160,7 @@ function calculateBattleScript(userCards, rivalCards, allTournamentWeightClasses
         rivalCardHistory.push({ style });
         console.log(`  🃏 Rival card: ${c.fighter.Fighter} (${style})`);
       });
+      
     }
 
     events.push({
@@ -1168,36 +1173,49 @@ function calculateBattleScript(userCards, rivalCards, allTournamentWeightClasses
     let rivalTotalDamage = currentRivalCards.reduce((sum, card) => sum + Math.round(card.fighter['Total Damage']), 0);
 
     // === ПРОВЕРКА COMBO ===
-    let userCombo = null, rivalCombo = null;
-    if (userComboAbilities.length > 0) {
+
+      // Если выпала новая карта — сбрасываем флаг, чтобы можно было активировать комбо снова
+    if (userCardsToAdd.length > 0) userComboActivated = false;
+    if (rivalCardsToAdd.length > 0) rivalComboActivated = false;
+
+        let userCombo = null, rivalCombo = null;
+        if (userComboAbilities.length > 0) {
       console.log('  🔍 Checking user COMBO...');
-      userCombo = checkCombo(userComboAbilities, userCardHistory);
+      userCombo = checkCombo(userComboAbilities, userCardHistory, userComboActivated);
+      if (userCombo) userComboActivated = true;
     }
     if (rivalComboAbilities.length > 0) {
       console.log('  🔍 Checking rival COMBO...');
-      rivalCombo = checkCombo(rivalComboAbilities, rivalCardHistory);
+      rivalCombo = checkCombo(rivalComboAbilities, rivalCardHistory, rivalComboActivated);
+      if (rivalCombo) rivalComboActivated = true;
     }
 
-    let userDamageMultiplier = 1.0, rivalDamageMultiplier = 1.0;
+        let userDamageMultiplier = 1.0, rivalDamageMultiplier = 1.0;
     let userHitCount = 1, rivalHitCount = 1;
-    let userBlockIncoming = false, rivalBlockIncoming = false;
+    let userBlockIncomingPercent = 0, rivalBlockIncomingPercent = 0;
 
     if (userCombo) {
       userDamageMultiplier = userCombo.damageMultiplier;
       userHitCount = userCombo.hitCount || 1;
-      if (userCombo.blockIncoming) userBlockIncoming = true;
-      console.log(`🔥 User COMBO: ${userCombo.name} x${userDamageMultiplier}, hits: ${userHitCount}, block: ${userBlockIncoming}`);
+      userBlockIncomingPercent = userCombo.blockIncomingPercent || 0;
+      console.log(`🔥 User COMBO: ${userCombo.name} x${userDamageMultiplier}, hits: ${userHitCount}, block: ${userBlockIncomingPercent}%`);
     }
 
     if (rivalCombo) {
       rivalDamageMultiplier = rivalCombo.damageMultiplier;
       rivalHitCount = rivalCombo.hitCount || 1;
-      if (rivalCombo.blockIncoming) rivalBlockIncoming = true;
-      console.log(`🔥 Rival COMBO: ${rivalCombo.name} x${rivalDamageMultiplier}, hits: ${rivalHitCount}, block: ${rivalBlockIncoming}`);
+      rivalBlockIncomingPercent = rivalCombo.blockIncomingPercent || 0;
+      console.log(`🔥 Rival COMBO: ${rivalCombo.name} x${rivalDamageMultiplier}, hits: ${rivalHitCount}, block: ${rivalBlockIncomingPercent}%`);
     }
 
-    if (rivalBlockIncoming) { userTotalDamage = 0; userHitCount = 0; console.log('  🛡️ User damage BLOCKED by rival'); }
-    if (userBlockIncoming) { rivalTotalDamage = 0; rivalHitCount = 0; console.log('  🛡️ Rival damage BLOCKED by user'); }
+            if (rivalBlockIncomingPercent > 0) {
+      userTotalDamage = Math.round(userTotalDamage * (1 - rivalBlockIncomingPercent / 100));
+      console.log(`  🛡️ Rival BLOCKS ${rivalBlockIncomingPercent}% incoming damage, remaining: ${userTotalDamage}`);
+    }
+    if (userBlockIncomingPercent > 0) {
+      rivalTotalDamage = Math.round(rivalTotalDamage * (1 - userBlockIncomingPercent / 100));
+      console.log(`  🛡️ User BLOCKS ${userBlockIncomingPercent}% incoming damage, remaining: ${rivalTotalDamage}`);
+    }
 
     if (userCombo) {
       console.log(`🔥 User COMBO: ${userCombo.name} | Base: ${userTotalDamage} | Multiplier: ${userDamageMultiplier} | Hits: ${userHitCount} | Total: ${Math.round(userTotalDamage * userDamageMultiplier * userHitCount)}`);
@@ -1232,8 +1250,8 @@ if (userCombo) {
 if (rivalCombo) {
   console.log(`  🔥 Rival COMBO: ${rivalCombo.name} | Multiplier: ${rivalDamageMultiplier} | Hits: ${rivalHitCount}`);
 }
-if (userBlockIncoming) console.log(`  🛡️ User BLOCKS rival damage`);
-if (rivalBlockIncoming) console.log(`  🛡️ Rival BLOCKS user damage`);
+if (userBlockIncomingPercent > 0) console.log(`  🛡️ User BLOCKS ${userBlockIncomingPercent}% rival damage`);
+if (rivalBlockIncomingPercent > 0) console.log(`  🛡️ Rival BLOCKS ${rivalBlockIncomingPercent}% user damage`);
 
 console.log(`  💥 Final damage: User ${finalUserDamage} -> Rival, Rival ${finalRivalDamage} -> User`);
 console.log(`  ❤️ Health after: User ${currentUserHealth - finalRivalDamage}/${baseHealth + Math.round(baseHealth * (userHealthBonus / 100))}, Rival ${currentRivalHealth - finalUserDamage}/${baseHealth + Math.round(baseHealth * (rivalHealthBonus / 100))}`);
@@ -1243,7 +1261,7 @@ console.log(`  ❤️ Health after: User ${currentUserHealth - finalRivalDamage}
       userDamage: finalUserDamage, rivalDamage: finalRivalDamage,
       userHealthAfter: currentUserHealth, rivalHealthAfter: currentRivalHealth,
       userHitCount, rivalHitCount,
-      userCombo: userCombo ? { name: userCombo.name, multiplier: userDamageMultiplier } : null,
+            userCombo: userCombo ? { name: userCombo.name, multiplier: userDamageMultiplier } : null,
       rivalCombo: rivalCombo ? { name: rivalCombo.name, multiplier: rivalDamageMultiplier } : null
     });
 
