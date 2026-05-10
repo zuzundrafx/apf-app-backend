@@ -1588,48 +1588,41 @@ if (isContenders) {
         });
       }
       
-            // Обновляем tier_levels_remaining при победе
-      if (result === 'win') {
-        let { data: currentProgress } = await supabase
-          .from('user_league_progress')
-          .select('tier_levels_remaining')
-          .eq('user_id', userId)
-          .eq('tournament_id', tournamentId)
-          .eq('tier_name', tier_name)
-          .single();
-        
-        // Если записи нет — создаём с начальным значением tier_levels
-        if (!currentProgress) {
-          const initialLevels = tierConfig.tier_levels;
-          await supabase.from('user_league_progress').insert({
-            user_id: userId,
-            tournament_id: tournamentId,
-            tier_name: tier_name,
-            tier_levels_remaining: initialLevels,
-            ranking_points: 0
-          });
-          currentProgress = { tier_levels_remaining: initialLevels };
-          console.log(`📊 [Tier] Created new progress for ${tier_name} with ${initialLevels} levels`);
-        }
-        
-        if (currentProgress.tier_levels_remaining > 0) {
-          console.log(`📊 [Tier] Updating tier_levels for ${tier_name}: ${currentProgress.tier_levels_remaining} -> ${currentProgress.tier_levels_remaining - 1}`);
-          const { error: updateTierError } = await supabase.from('user_league_progress')
-            .update({ 
-              tier_levels_remaining: currentProgress.tier_levels_remaining - 1,
-              updated_at: new Date()
-            })
-            .eq('user_id', userId)
-            .eq('tournament_id', tournamentId)
-            .eq('tier_name', tier_name);
-          
-          if (updateTierError) {
-            console.error('❌ [Tier] Update error:', updateTierError);
-          } else {
-            console.log('✅ [Tier] Successfully updated');
-          }
-        }
-      }
+       // Обновляем tier_levels_remaining при победе (в ТОЙ ЖЕ лиге)
+if (result === 'win') {
+  let { data: currentProgress } = await supabase
+    .from('user_league_progress')
+    .select('tier_levels_remaining')
+    .eq('user_id', userId)
+    .eq('tournament_id', tournamentId)
+    .eq('tier_name', tier_name)
+    .single();
+  
+  if (!currentProgress) {
+    const initialLevels = tierConfig?.tier_levels || 3;
+    await supabase.from('user_league_progress').insert({
+      user_id: userId,
+      tournament_id: tournamentId,
+      tier_name: tier_name,
+      tier_levels_remaining: initialLevels,
+      ranking_points: 0
+    });
+    currentProgress = { tier_levels_remaining: initialLevels };
+  }
+  
+  if (currentProgress.tier_levels_remaining > 0) {
+    const newRemaining = currentProgress.tier_levels_remaining - 1;
+    
+    await supabase.from('user_league_progress')
+      .update({ 
+        tier_levels_remaining: newRemaining,
+        updated_at: new Date()
+      })
+      .eq('user_id', userId)
+      .eq('tournament_id', tournamentId)
+      .eq('tier_name', tier_name);
+  }
+}
       
       
     }
