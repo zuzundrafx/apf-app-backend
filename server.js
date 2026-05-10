@@ -1330,14 +1330,13 @@ app.post('/api/pvp/start', authenticate, async (req, res) => {
         return res.status(400).json({ error: `Player level too low. Required: ${tierConfig.min_player_level}` });
       }
       
-      // Проверяем, что лига открыта (tier_levels_remaining = 0)
+      // Проверяем, что лига открыта
 console.log(`🔍 [Tier] Checking league progress for userId=${userId}, tournamentId=${tournamentId}, tier_name="${tier_name}"`);
 
-// Contenders лига всегда открыта
 const isContenders = tier_name === 'ufc_contenders' || tier_name.endsWith('_contenders');
 
 if (isContenders) {
-  // Для Contenders: если записи нет — создаём её с tier_levels_remaining = 0
+  // Contenders всегда открыта, создаём запись если нужно
   const { data: existingProgress } = await supabase
     .from('user_league_progress')
     .select('tier_levels_remaining')
@@ -1352,23 +1351,32 @@ if (isContenders) {
       user_id: userId,
       tournament_id: tournamentId,
       tier_name: tier_name,
-      tier_levels_remaining: 0,
+      tier_levels_remaining: tierConfig.tier_levels,
       ranking_points: 0
     });
   }
 } else {
-  // Для остальных лиг — обязательная проверка
-  const { data: leagueProgress } = await supabase
-    .from('user_league_progress')
-    .select('tier_levels_remaining')
-    .eq('user_id', userId)
-    .eq('tournament_id', tournamentId)
-    .eq('tier_name', tier_name)
-    .single();
-
-  if (!leagueProgress || leagueProgress.tier_levels_remaining > 0) {
-    console.log(`❌ [Tier] Tier not unlocked: ${JSON.stringify(leagueProgress)}`);
-    return res.status(400).json({ error: 'This tier is not unlocked yet' });
+  // Для Pro, Elite, Legend — проверяем ПРЕДЫДУЩУЮ лигу
+  const tierOrder = ['ufc_contenders', 'ufc_pro', 'ufc_elite', 'ufc_legend'];
+  const currentIdx = tierOrder.indexOf(tier_name);
+  
+  if (currentIdx > 0) {
+    const prevTierName = tierOrder[currentIdx - 1];
+    console.log(`🔍 [Tier] Checking previous tier: ${prevTierName}`);
+    
+    const { data: prevProgress } = await supabase
+      .from('user_league_progress')
+      .select('tier_levels_remaining')
+      .eq('user_id', userId)
+      .eq('tournament_id', tournamentId)
+      .eq('tier_name', prevTierName)
+      .single();
+    
+    if (!prevProgress || prevProgress.tier_levels_remaining > 0) {
+      console.log(`❌ [Tier] ${tier_name} not unlocked - previous tier ${prevTierName} has ${prevProgress?.tier_levels_remaining} wins remaining`);
+      return res.status(400).json({ error: 'This tier is not unlocked yet' });
+    }
+    console.log(`✅ [Tier] ${tier_name} unlocked - previous tier ${prevTierName} completed`);
   }
 }
       
