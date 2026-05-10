@@ -1296,7 +1296,7 @@ app.post('/api/pvp/start', authenticate, async (req, res) => {
     const userId = req.user.userId;
     let betAmount = requestBetAmount;
 
-    console.log(`🎮 PvP start: userId=${userId}, tournamentId=${tournamentId}, betAmount=${betAmount}`);
+    console.log(`🎮 PvP start: userId=${userId}, tournamentId=${tournamentId}, betAmount=${betAmount}, tier_name=${tier_name}`);
 
     const { data: userBet, error: betError } = await supabase
       .from('bets').select('total_damage, selections')
