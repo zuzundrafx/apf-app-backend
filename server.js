@@ -1292,8 +1292,9 @@ console.log(`  ❤️ Health after: User ${currentUserHealth - finalRivalDamage}
 // ---------- PVP ----------
 app.post('/api/pvp/start', authenticate, async (req, res) => {
   try {
-    const { tournamentId, betAmount } = req.body;
+    const { tournamentId, betAmount: requestBetAmount, tier_name } = req.body;
     const userId = req.user.userId;
+    let betAmount = requestBetAmount;
 
     console.log(`🎮 PvP start: userId=${userId}, tournamentId=${tournamentId}, betAmount=${betAmount}`);
 
@@ -1305,12 +1306,64 @@ app.post('/api/pvp/start', authenticate, async (req, res) => {
       return res.status(400).json({ error: 'No valid bet found for this tournament' });
     }
 
-    const { data: user, error: userError } = await supabase
-      .from('users').select('coins, tickets').eq('id', userId).single();
+        const { data: user, error: userError } = await supabase
+      .from('users').select('coins, tickets, level').eq('id', userId).single();
     if (userError) throw userError;
-    if (user.coins < betAmount || user.tickets < 1) return res.status(400).json({ error: 'Not enough coins or tickets' });
 
-    await supabase.from('users').update({ coins: user.coins - betAmount, tickets: user.tickets - 1 }).eq('id', userId);
+    // Загружаем конфигурацию лиги (если указана)
+    let tierConfig = null;
+    if (tier_name) {
+      const { data: config } = await supabase
+        .from('ranking_tiers_config')
+        .select('*')
+        .eq('tier_name', tier_name)
+        .single();
+      
+      if (!config) {
+        return res.status(400).json({ error: 'Invalid ranking tier' });
+      }
+      tierConfig = config;
+      
+      // Проверяем уровень игрока
+      if (user.level < tierConfig.min_player_level) {
+        return res.status(400).json({ error: `Player level too low. Required: ${tierConfig.min_player_level}` });
+      }
+      
+      // Проверяем, что лига открыта (tier_levels_remaining = 0)
+      const { data: leagueProgress } = await supabase
+        .from('user_league_progress')
+        .select('tier_levels_remaining')
+        .eq('user_id', userId)
+        .eq('tournament_id', tournamentId)
+        .eq('tier_name', tier_name)
+        .single();
+      
+      if (!leagueProgress || leagueProgress.tier_levels_remaining > 0) {
+        return res.status(400).json({ error: 'This tier is not unlocked yet' });
+      }
+      
+      // Для Contenders — ставка фиксированная
+      if (tier_name === 'ufc_contenders' || tier_name.endsWith('_contenders')) {
+        betAmount = tierConfig.entry_fee_min;
+      }
+      
+      // Проверяем, что ставка в диапазоне
+      if (betAmount < tierConfig.entry_fee_min || betAmount > tierConfig.entry_fee_max) {
+        return res.status(400).json({ error: `Bet must be between ${tierConfig.entry_fee_min} and ${tierConfig.entry_fee_max}` });
+      }
+      
+      // Проверяем билеты
+      if (user.tickets < tierConfig.tickets_fee) {
+        return res.status(400).json({ error: `Not enough tickets. Required: ${tierConfig.tickets_fee}` });
+      }
+    }
+
+    if (user.coins < betAmount) return res.status(400).json({ error: 'Not enough coins' });
+
+    const ticketsToSpend = tierConfig ? tierConfig.tickets_fee : 1;
+    await supabase.from('users')
+      .update({ coins: user.coins - betAmount, tickets: user.tickets - ticketsToSpend })
+      .eq('id', userId);
 
     const { data: userAbilitiesData } = await supabase
       .from('user_abilities').select(`ability_id, current_level, abilities!inner (id, name, style, type, max_level)`)
@@ -1335,19 +1388,43 @@ app.post('/api/pvp/start', authenticate, async (req, res) => {
     const allWeightClasses = [...new Set(tournamentFighters.map(f => f.weight_class))];
     console.log(`📊 Weight classes:`, allWeightClasses);
 
-    const { data: rivals } = await supabase
+        const { data: rivals } = await supabase
       .from('bets').select('user_id, total_damage, selections')
       .eq('tournament_id', tournamentId).eq('cancelled', false).neq('user_id', userId);
 
     if (!rivals || rivals.length === 0) {
-      await supabase.from('users').update({ coins: user.coins, tickets: user.tickets }).eq('id', userId);
+      await supabase.from('users')
+        .update({ coins: user.coins, tickets: user.tickets })
+        .eq('id', userId);
       return res.status(400).json({ error: 'No opponents available' });
     }
 
+    // Если указана лига — фильтруем соперников по открытой лиге
+    let filteredRivals = rivals;
+    if (tier_name) {
+      const { data: eligibleRivals } = await supabase
+        .from('user_league_progress')
+        .select('user_id')
+        .eq('tournament_id', tournamentId)
+        .eq('tier_name', tier_name)
+        .eq('tier_levels_remaining', 0)
+        .neq('user_id', userId);
+      
+      const eligibleIds = eligibleRivals?.map(r => r.user_id) || [];
+      filteredRivals = rivals.filter(r => eligibleIds.includes(r.user_id));
+      
+      if (filteredRivals.length === 0) {
+        await supabase.from('users')
+          .update({ coins: user.coins, tickets: user.tickets })
+          .eq('id', userId);
+        return res.status(400).json({ error: 'No opponents available in this tier' });
+      }
+    }
+
     const userDamage = userBet.total_damage;
-    let bestRival = rivals[0];
+    let bestRival = filteredRivals[0];
     let minDiff = Math.abs(userDamage - bestRival.total_damage);
-    for (const r of rivals) {
+    for (const r of filteredRivals) {
       const diff = Math.abs(userDamage - r.total_damage);
       if (diff < minDiff) { minDiff = diff; bestRival = r; }
     }
@@ -1434,24 +1511,95 @@ app.post('/api/pvp/start', authenticate, async (req, res) => {
       expReward = 4;
     }
 
-        
+       let bonusTickets = 0; 
 
-        // Начисляем опыт и монеты
+       // Применяем модификаторы лиги к наградам
+    
+      if (tierConfig) {
+      expReward = Math.round(expReward * tierConfig.exp_multiplier);
+      
+      // Монеты с комиссией
+      if (!tierConfig.coin_reward) {
+        coinsReward = 0;
+      } else if (result === 'win' && coinsReward > 0) {
+        const rake = Math.round(coinsReward * tierConfig.rake_percent);
+        coinsReward = coinsReward - rake;
+      }
+      
+      // Бонусные билеты
+      let bonusTickets = 0;
+      if (tierConfig.ticket_rewards && result === 'win') {
+        const tr = tierConfig.ticket_rewards;
+        if (resultType === 'ko') bonusTickets = tr.ko || 0;
+        else if (resultType === 'decision-unanimous') bonusTickets = tr.udec || 0;
+        else if (resultType === 'decision-split') bonusTickets = tr.sdec || 0;
+      }
+      
+      // Ranking Points
+      let rankingPointsReward = 0;
+      if (tierConfig.ranking_points_rewards) {
+        const rp = tierConfig.ranking_points_rewards;
+        if (result === 'win') {
+          if (resultType === 'ko') rankingPointsReward = rp.ko || 5;
+          else if (resultType === 'decision-unanimous') rankingPointsReward = rp.udec || 3;
+          else if (resultType === 'decision-split') rankingPointsReward = rp.sdec || 2;
+        } else if (result === 'draw') {
+          rankingPointsReward = rp.draw || 1;
+        }
+      }
+      
+      // Обновляем Ranking Points
+      if (rankingPointsReward > 0) {
+        await supabase.rpc('update_ranking_points', {
+          p_user_id: userId,
+          p_tournament_id: tournamentId,
+          p_tier_name: tier_name,
+          p_points: rankingPointsReward
+        });
+      }
+      
+      // Обновляем tier_levels_remaining при победе
+      if (result === 'win') {
+        const { data: currentProgress } = await supabase
+          .from('user_league_progress')
+          .select('tier_levels_remaining')
+          .eq('user_id', userId)
+          .eq('tournament_id', tournamentId)
+          .eq('tier_name', tier_name)
+          .single();
+        
+        if (currentProgress && currentProgress.tier_levels_remaining > 0) {
+          await supabase.from('user_league_progress')
+            .update({ 
+              tier_levels_remaining: currentProgress.tier_levels_remaining - 1,
+              updated_at: new Date()
+            })
+            .eq('user_id', userId)
+            .eq('tournament_id', tournamentId)
+            .eq('tier_name', tier_name);
+        }
+      }
+      
+      
+    }
+
+    // Начисляем опыт и монеты
     const winnerId = result === 'win' ? userId : (result === 'loss' ? bestRival.user_id : null);
     let updatedWinner = null;
 
     // Победитель получает монеты + опыт
     if (winnerId) {
       const { data: winner } = await supabase
-        .from('users').select('coins, experience, level, exp_points').eq('id', winnerId).single();
+        .from('users').select('coins, tickets, experience, level, exp_points').eq('id', winnerId).single();
       const newExp = winner.experience + expReward;
       const newCoins = winner.coins + coinsReward;
+      const newTickets = winner.tickets + (bonusTickets || 0);
       const { level, currentExp, nextLevelExp } = calculateLevel(newExp);
       let newExpPoints = winner.exp_points;
       if (level > winner.level) newExpPoints += (level - winner.level);
       
-      await supabase.from('users')
-        .update({ coins: newCoins, experience: newExp, level: level, exp_points: newExpPoints })
+            await supabase.from('users')
+        .update({ coins: newCoins, tickets: newTickets, experience: newExp, level: level, exp_points: newExpPoints })
         .eq('id', winnerId);
       
       updatedWinner = { userId: winnerId, coins: newCoins, totalExp: newExp, level, currentExp, nextLevelExp, expPoints: newExpPoints };
@@ -1587,7 +1735,78 @@ app.post('/api/abilities/learn', authenticate, async (req, res) => {
   }
 });
 
+// ---------- РЕЙТИНГОВЫЕ ЛИГИ ----------
 
+// Получение конфигурации всех лиг
+app.get('/api/ranking-tiers/config', async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('ranking_tiers_config')
+      .select('*')
+      .order('sort_order');
+    
+    if (error) throw error;
+    res.json(data);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Получение прогресса пользователя по лигам для конкретного турнира
+app.get('/api/ranking-tiers/progress', authenticate, async (req, res) => {
+  try {
+    const { tournament_id, league } = req.query;
+    const userId = req.user.userId;
+    
+    if (!tournament_id) {
+      return res.status(400).json({ error: 'tournament_id is required' });
+    }
+    
+    // Фильтр по league (UFC, PFL...) если передан
+    let configQuery = supabase.from('ranking_tiers_config').select('*').order('sort_order');
+    if (league) {
+      configQuery = configQuery.eq('league', league);
+    }
+    
+    const { data: configs } = await configQuery;
+    
+    if (!configs || configs.length === 0) {
+      return res.json({ configs: [], progress: [] });
+    }
+    
+    const { data: progress } = await supabase
+      .from('user_league_progress')
+      .select('*')
+      .eq('user_id', userId)
+      .eq('tournament_id', tournament_id);
+    
+    // Если прогресса нет — создаём начальный для всех лиг
+    if (!progress || progress.length === 0) {
+      const initialProgress = configs.map(config => ({
+        user_id: userId,
+        tournament_id: parseInt(tournament_id),
+        tier_name: config.tier_name,
+        tier_levels_remaining: config.tier_levels,
+        ranking_points: 0
+      }));
+      
+      const { data: newProgress, error: insertError } = await supabase
+        .from('user_league_progress')
+        .insert(initialProgress)
+        .select();
+      
+      if (insertError) throw insertError;
+      
+      return res.json({ configs, progress: newProgress });
+    }
+    
+    res.json({ configs, progress });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
 
 
 
