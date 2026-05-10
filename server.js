@@ -1313,6 +1313,7 @@ app.post('/api/pvp/start', authenticate, async (req, res) => {
     // Загружаем конфигурацию лиги (если указана)
     let tierConfig = null;
     if (tier_name) {
+      console.log(`🔍 [Tier] tier_name received: "${tier_name}"`);
       const { data: config } = await supabase
         .from('ranking_tiers_config')
         .select('*')
@@ -1330,6 +1331,7 @@ app.post('/api/pvp/start', authenticate, async (req, res) => {
       }
       
       // Проверяем, что лига открыта (tier_levels_remaining = 0)
+      console.log(`🔍 [Tier] Checking league progress for userId=${userId}, tournamentId=${tournamentId}, tier_name="${tier_name}"`);
       const { data: leagueProgress } = await supabase
         .from('user_league_progress')
         .select('tier_levels_remaining')
