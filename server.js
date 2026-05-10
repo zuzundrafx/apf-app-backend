@@ -1331,18 +1331,46 @@ app.post('/api/pvp/start', authenticate, async (req, res) => {
       }
       
       // Проверяем, что лига открыта (tier_levels_remaining = 0)
-      console.log(`🔍 [Tier] Checking league progress for userId=${userId}, tournamentId=${tournamentId}, tier_name="${tier_name}"`);
-      const { data: leagueProgress } = await supabase
-        .from('user_league_progress')
-        .select('tier_levels_remaining')
-        .eq('user_id', userId)
-        .eq('tournament_id', tournamentId)
-        .eq('tier_name', tier_name)
-        .single();
-      
-      if (!leagueProgress || leagueProgress.tier_levels_remaining > 0) {
-        return res.status(400).json({ error: 'This tier is not unlocked yet' });
-      }
+console.log(`🔍 [Tier] Checking league progress for userId=${userId}, tournamentId=${tournamentId}, tier_name="${tier_name}"`);
+
+// Contenders лига всегда открыта
+const isContenders = tier_name === 'ufc_contenders' || tier_name.endsWith('_contenders');
+
+if (isContenders) {
+  // Для Contenders: если записи нет — создаём её с tier_levels_remaining = 0
+  const { data: existingProgress } = await supabase
+    .from('user_league_progress')
+    .select('tier_levels_remaining')
+    .eq('user_id', userId)
+    .eq('tournament_id', tournamentId)
+    .eq('tier_name', tier_name)
+    .single();
+  
+  if (!existingProgress) {
+    console.log(`📊 [Tier] Creating Contenders progress record`);
+    await supabase.from('user_league_progress').insert({
+      user_id: userId,
+      tournament_id: tournamentId,
+      tier_name: tier_name,
+      tier_levels_remaining: 0,
+      ranking_points: 0
+    });
+  }
+} else {
+  // Для остальных лиг — обязательная проверка
+  const { data: leagueProgress } = await supabase
+    .from('user_league_progress')
+    .select('tier_levels_remaining')
+    .eq('user_id', userId)
+    .eq('tournament_id', tournamentId)
+    .eq('tier_name', tier_name)
+    .single();
+
+  if (!leagueProgress || leagueProgress.tier_levels_remaining > 0) {
+    console.log(`❌ [Tier] Tier not unlocked: ${JSON.stringify(leagueProgress)}`);
+    return res.status(400).json({ error: 'This tier is not unlocked yet' });
+  }
+}
       
       // Для Contenders — ставка фиксированная
       if (tier_name === 'ufc_contenders' || tier_name.endsWith('_contenders')) {
