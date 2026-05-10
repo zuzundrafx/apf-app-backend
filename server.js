@@ -1569,15 +1569,24 @@ app.post('/api/pvp/start', authenticate, async (req, res) => {
           .single();
         
         if (currentProgress && currentProgress.tier_levels_remaining > 0) {
-          await supabase.from('user_league_progress')
-            .update({ 
-              tier_levels_remaining: currentProgress.tier_levels_remaining - 1,
-              updated_at: new Date()
-            })
-            .eq('user_id', userId)
-            .eq('tournament_id', tournamentId)
-            .eq('tier_name', tier_name);
-        }
+  console.log(`📊 [Tier] Updating tier_levels for ${tier_name}: ${currentProgress.tier_levels_remaining} -> ${currentProgress.tier_levels_remaining - 1}`);
+  const { error: updateTierError } = await supabase.from('user_league_progress')
+    .update({ 
+      tier_levels_remaining: currentProgress.tier_levels_remaining - 1,
+      updated_at: new Date()
+    })
+    .eq('user_id', userId)
+    .eq('tournament_id', tournamentId)
+    .eq('tier_name', tier_name);
+  
+  if (updateTierError) {
+    console.error('❌ [Tier] Update error:', updateTierError);
+  } else {
+    console.log('✅ [Tier] Successfully updated');
+  }
+} else {
+  console.log(`📊 [Tier] Skipping update: progress=${!!currentProgress}, remaining=${currentProgress?.tier_levels_remaining}`);
+}
       }
       
       
