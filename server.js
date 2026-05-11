@@ -1619,6 +1619,9 @@ if (result === 'win') {
   }
   
   if (currentProgress.tier_levels_remaining > 0) {
+
+    console.log(`📊 [Tier] Will update ${tier_name}: current=${currentProgress.tier_levels_remaining}`);
+
     const newRemaining = currentProgress.tier_levels_remaining - 1;
     
     await supabase.from('user_league_progress')
@@ -1629,6 +1632,9 @@ if (result === 'win') {
       .eq('user_id', userId)
       .eq('tournament_id', tournamentId)
       .eq('tier_name', tier_name);
+
+console.log(`✅ [Tier] Updated ${tier_name}: ${currentProgress.tier_levels_remaining} -> ${newRemaining}`);
+
   }
 }
       
