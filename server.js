@@ -1574,7 +1574,7 @@ if (isContenders) {
       }
       
       // Ranking Points
-      let rankingPointsReward = 0;
+      rankingPointsReward = 0;
       if (tierConfig.ranking_points_rewards) {
         const rp = tierConfig.ranking_points_rewards;
         if (result === 'win') {
