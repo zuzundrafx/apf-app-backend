@@ -1550,7 +1550,7 @@ if (isContenders) {
     }
 
        let bonusTickets = 0; 
-
+      let rankingPointsReward = 0;  // ← ДОБАВИТЬ ЭТУ СТРОКУ
        // Применяем модификаторы лиги к наградам
     
       if (tierConfig) {
@@ -1712,16 +1712,29 @@ console.log(`✅ [Tier] Updated ${tier_name}: ${currentProgress.tier_levels_rema
       rival_total_damage: enhancedRivalCards.reduce((s, c) => s + c.fighter['Total Damage'], 0)
     });
 
-    const { data: updatedUser } = await supabase.from('users').select('coins, tickets').eq('id', userId).single();
+        const { data: updatedUser } = await supabase.from('users').select('coins, tickets').eq('id', userId).single();
+
+    // Получаем обновлённый прогресс лиг
+    const { data: updatedTierProgress } = await supabase
+      .from('user_league_progress')
+      .select('*')
+      .eq('user_id', userId)
+      .eq('tournament_id', tournamentId);
 
     res.json({
       success: true,
       battleScript: { events: battleEvents },
-      rewards: { coins: coinsReward, experience: expReward },
+      rewards: { 
+        coins: coinsReward, 
+        experience: expReward, 
+        tickets: bonusTickets,
+        rankingPoints: rankingPointsReward 
+      },
       rival: { username: rivalProfile?.username || 'Opponent', photoUrl: rivalProfile?.photo_url, style: rivalProfile?.style || null, selections: rivalCards },
       healthBonuses: { user: userHealthBonus, rival: rivalHealthBonus },
       updatedBalance: { coins: updatedUser.coins, tickets: updatedUser.tickets },
-      updatedWinner: updatedWinner
+      updatedWinner: updatedWinner,
+      tierProgress: updatedTierProgress
     });
   } catch (err) {
     console.error('❌ PvP error:', err);
