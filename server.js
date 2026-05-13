@@ -1545,9 +1545,14 @@ if (isContenders) {
     } else if (result === 'loss') {
       expReward = resultType === 'ko' ? 1 : (resultType === 'decision-unanimous' ? 2 : 3);
     } else if (result === 'draw') {
-      coinsReward = betAmount;
-      expReward = 4;
-    }
+  let drawReward = betAmount;
+  if (tierConfig) {
+    const rakeAmount = Math.ceil(betAmount * tierConfig.rake_percent);
+    drawReward = betAmount - rakeAmount;
+  }
+  coinsReward = drawReward;
+  expReward = 4;
+}
 
        let bonusTickets = 0; 
       let rankingPointsReward = 0;  // ← ДОБАВИТЬ ЭТУ СТРОКУ
@@ -1734,7 +1739,8 @@ console.log(`✅ [Tier] Updated ${tier_name}: ${currentProgress.tier_levels_rema
       healthBonuses: { user: userHealthBonus, rival: rivalHealthBonus },
       updatedBalance: { coins: updatedUser.coins, tickets: updatedUser.tickets },
       updatedWinner: updatedWinner,
-      tierProgress: updatedTierProgress
+      tierProgress: updatedTierProgress,
+      betAmountWithRake: tierConfig ? betAmount - Math.ceil(betAmount * tierConfig.rake_percent) : betAmount
     });
   } catch (err) {
     console.error('❌ PvP error:', err);
