@@ -1914,6 +1914,242 @@ app.get('/api/ranking-tiers/progress', authenticate, async (req, res) => {
   }
 });
 
+// ---------- ВСЕ УРОВНИ СПОСОБНОСТЕЙ (кешируется на фронте) ----------
+app.get('/api/ability-levels', async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('ability_levels')
+      .select('*')
+      .order('ability_id, level');
+    
+    if (error) throw error;
+    res.json(data);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
 
+// ---------- СПОСОБНОСТИ ПОЛЬЗОВАТЕЛЯ С ПОЛНЫМИ ДАННЫМИ ----------
+app.get('/api/user/abilities/full', authenticate, async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    
+    const { data: userAbilities, error: uaError } = await supabase
+      .from('user_abilities')
+      .select('ability_id, current_level')
+      .eq('user_id', userId)
+      .gt('current_level', 0);
+    
+    if (uaError) throw uaError;
+    
+    if (!userAbilities || userAbilities.length === 0) {
+      return res.json([]);
+    }
+    
+    const abilityIds = userAbilities.map(ua => ua.ability_id);
+    
+    const { data: abilities, error: aError } = await supabase
+      .from('abilities')
+      .select('*')
+      .in('id', abilityIds);
+    
+    if (aError) throw aError;
+    
+    const { data: levels, error: lError } = await supabase
+      .from('ability_levels')
+      .select('*')
+      .in('ability_id', abilityIds);
+    
+    if (lError) throw lError;
+    
+    const result = userAbilities.map(ua => {
+      const ability = abilities.find(a => a.id === ua.ability_id);
+      const levelData = levels?.find(l => l.ability_id === ua.ability_id && l.level === ua.current_level);
+      return {
+        ...ability,
+        current_level: ua.current_level,
+        level_data: levelData || null
+      };
+    });
+    
+    res.json(result);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ---------- РАСЧЁТ ДЕТАЛИЗАЦИИ БОЙЦОВ ----------
+app.post('/api/fighters/calculate-details', authenticate, async (req, res) => {
+  try {
+    const { tournamentId, selections } = req.body;
+    const userId = req.user.userId;
+    
+    if (!tournamentId || !selections || selections.length !== 5) {
+      return res.status(400).json({ error: 'Invalid request' });
+    }
+    
+    // 1. Загружаем способности пользователя
+    const { data: userAbilitiesData } = await supabase
+      .from('user_abilities')
+      .select(`ability_id, current_level, abilities!inner (id, name, style, type, max_level)`)
+      .eq('user_id', userId)
+      .gt('current_level', 0);
+    
+    let userAbilities = [];
+    if (userAbilitiesData && userAbilitiesData.length > 0) {
+      const abilityIds = userAbilitiesData.map(ua => ua.ability_id);
+      const { data: levels } = await supabase
+        .from('ability_levels')
+        .select('*')
+        .in('ability_id', abilityIds);
+      
+      userAbilities = userAbilitiesData.map(ua => ({
+        ...ua.abilities,
+        current_level: ua.current_level,
+        level_data: levels?.find(l => l.ability_id === ua.ability_id && l.level === ua.current_level) || null
+      }));
+    }
+    
+    // 2. Загружаем полные данные бойцов
+    const fighterNames = selections.map(s => s.fighter.Fighter);
+    const { data: fightersData } = await supabase
+      .from('fighters')
+      .select('*')
+      .eq('tournament_id', parseInt(tournamentId))
+      .in('fighter_name', fighterNames);
+    
+    // 3. Применяем пассивные способности к картам
+    const { cards: enhancedCards, healthBonus } = applyPassiveAbilities(
+      selections.map(sel => ({ ...sel, fighter: { ...sel.fighter } })),
+      userAbilities,
+      fightersData
+    );
+    
+    // 4. Для каждого бойца собираем детальную информацию
+    const fightersDetails = selections.map((selection, idx) => {
+      const fighterData = fightersData?.find(f => f.fighter_name === selection.fighter.Fighter);
+      const enhancedCard = enhancedCards[idx];
+      
+      if (!fighterData) {
+        return {
+          fighter: selection.fighter,
+          weightClass: selection.weightClass,
+          style: getFighterStyle(
+            safeNumber(selection.fighter.Str),
+            safeNumber(selection.fighter.Td),
+            safeNumber(selection.fighter.Sub)
+          ),
+          baseDamage: {
+            total: selection.fighter['Total Damage'] || 0,
+            components: {}
+          },
+          pvpDamage: {
+            total: enhancedCard?.fighter['Total Damage'] || 0,
+            components: {}
+          }
+        };
+      }
+      
+      // Рассчитываем базовые компоненты урона (без скиллов)
+      const weightCoef = getWeightCoefficient(fighterData.weight_class);
+      const wl = (fighterData.wl || 'lose').toLowerCase();
+      let wkCoef = getCoef('LOSE_COEF') || 0.7;
+      if (wl === 'win') wkCoef = getCoef('WIN_COEF') || 1.0;
+      else if (wl === 'draw') wkCoef = getCoef('DRAW_COEF') || 0.9;
+      
+      const kd = safeNumber(fighterData.kd);
+      const td = safeNumber(fighterData.td);
+      const sub = safeNumber(fighterData.sub);
+      const head = safeNumber(fighterData.head);
+      const body = safeNumber(fighterData.body);
+      const leg = safeNumber(fighterData.leg);
+      
+      const method = (fighterData.method || '').toUpperCase();
+      let kdBonus = 0, subBonus = 0;
+      if (wl === 'win') {
+        if (method.includes('KO') || method.includes('TKO')) kdBonus = getCoef('KD_BONUS_WIN') || 40;
+        else if (method.includes('SUB')) subBonus = getCoef('SUB_BONUS_WIN') || 35;
+      }
+      
+      const KD_COEF = getCoef('KD_COEF') || 25;
+      const TD_COEF = getCoef('TD_COEF') || 10;
+      const SUB_COEF = getCoef('SUB_COEF') || 15;
+      const HEAD_COEF = getCoef('HEAD_COEF') || 1;
+      const BODY_COEF = getCoef('BODY_COEF') || 0.9;
+      const LEG_COEF = getCoef('LEG_COEF') || 0.8;
+      
+      // Базовые компоненты
+      const baseComponents = {
+        weightCoef: weightCoef,
+        wkCoef: wkCoef,
+        kdBonus: kdBonus,
+        subBonus: subBonus,
+        kdDamage: Math.round(kd * KD_COEF * weightCoef * wkCoef),
+        tdDamage: Math.round(td * TD_COEF * weightCoef * wkCoef),
+        subDamage: Math.round(sub * SUB_COEF * weightCoef * wkCoef),
+        headDamage: Math.round(head * HEAD_COEF * weightCoef * wkCoef),
+        bodyDamage: Math.round(body * BODY_COEF * weightCoef * wkCoef),
+        legDamage: Math.round(leg * LEG_COEF * weightCoef * wkCoef)
+      };
+      
+      // PvP компоненты (берём из enhancedCard)
+      const pvpComponents = {
+        weightCoef: weightCoef,
+        wkCoef: wkCoef,
+        kdBonus: kdBonus,
+        subBonus: subBonus,
+        kdDamage: 0,
+        tdDamage: 0,
+        subDamage: 0,
+        headDamage: 0,
+        bodyDamage: 0,
+        legDamage: 0
+      };
+      
+      // Если есть enhancedCard, разбираем её компоненты
+      if (enhancedCard && enhancedCard.fighter['Total Damage'] !== selection.fighter['Total Damage']) {
+        // Здесь нужно получить отдельные компоненты из PvP расчёта
+        // Для простоты пока оставим так, при детальной реализации добавим
+      }
+      
+      return {
+        fighter: {
+          name: fighterData.fighter_name,
+          weightClass: fighterData.weight_class,
+          wl: wl,
+          method: fighterData.method,
+          kd: kd,
+          td: td,
+          sub: sub,
+          head: head,
+          body: body,
+          leg: leg,
+          str: safeNumber(fighterData.str),
+          totalDamage: selection.fighter['Total Damage']
+        },
+        style: getFighterStyle(
+          safeNumber(selection.fighter.Str),
+          safeNumber(selection.fighter.Td),
+          safeNumber(selection.fighter.Sub)
+        ),
+        baseDamage: {
+          total: selection.fighter['Total Damage'] || 0,
+          components: baseComponents
+        },
+        pvpDamage: {
+          total: enhancedCard?.fighter['Total Damage'] || 0,
+          components: pvpComponents
+        }
+      };
+    });
+    
+    res.json({ fightersDetails, healthBonus });
+  } catch (err) {
+    console.error('❌ Error calculating fighter details:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
 
 app.listen(port, () => console.log(`Server running on port ${port}`));
