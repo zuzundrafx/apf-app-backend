@@ -564,7 +564,36 @@ app.post('/api/tournaments/sync', async (req, res) => {
         if (!error) insertedCount++;
       }
     }
-    console.log(`✅ Inserted/updated ${insertedCount} fighters`);
+        console.log(`✅ Inserted/updated ${insertedCount} fighters`);
+
+    // Удаляем бойцов, которых больше нет в данных парсера
+    const newFighterNames = fighters.map(f => f.Fighter);
+    if (newFighterNames.length > 0) {
+      const { data: existingFighters } = await supabase
+        .from('fighters')
+        .select('id, fighter_name')
+        .eq('tournament_id', dbTournament.id);
+      
+      const fightersToDelete = existingFighters?.filter(
+        f => !newFighterNames.includes(f.fighter_name)
+      ) || [];
+      
+      if (fightersToDelete.length > 0) {
+        const idsToDelete = fightersToDelete.map(f => f.id);
+        console.log(`🗑️ Removing ${idsToDelete.length} fighters no longer in tournament:`, fightersToDelete.map(f => f.fighter_name).join(', '));
+        
+        const { error: deleteError } = await supabase
+          .from('fighters')
+          .delete()
+          .in('id', idsToDelete);
+        
+        if (deleteError) {
+          console.error('Error deleting old fighters:', deleteError);
+        } else {
+          console.log(`✅ Removed ${idsToDelete.length} old fighters`);
+        }
+      }
+    }
 
     // Обработка замен бойцов для ВСЕХ турниров (не только completed)
     console.log('🔍 Checking for fighter replacements...');
