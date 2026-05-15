@@ -2020,14 +2020,45 @@ app.post('/api/fighters/calculate-details', authenticate, async (req, res) => {
       .eq('tournament_id', parseInt(tournamentId))
       .in('fighter_name', fighterNames);
     
-    // 3. Применяем пассивные способности к картам
+    // 3. Применяем пассивные способности к картам (для получения общего PvP урона)
     const { cards: enhancedCards, healthBonus } = applyPassiveAbilities(
       selections.map(sel => ({ ...sel, fighter: { ...sel.fighter } })),
       userAbilities,
       fightersData
     );
     
-    // 4. Для каждого бойца собираем детальную информацию
+    // 4. Собираем бонусы из способностей для детального расчёта PvP компонентов
+    let skillBonuses = {
+      STYLE_STRIKER: 0,
+      STYLE_GRAPPLER: 0,
+      HEAD_COEF: 0
+    };
+    
+    if (userAbilities && userAbilities.length > 0) {
+      userAbilities.forEach(ability => {
+        if (ability.type === 'passive' && ability.level_data) {
+          if (ability.level_data.striker_damage_bonus) {
+            skillBonuses.STYLE_STRIKER += ability.level_data.striker_damage_bonus;
+          }
+          if (ability.level_data.grappler_damage_bonus) {
+            skillBonuses.STYLE_GRAPPLER += ability.level_data.grappler_damage_bonus;
+          }
+          if (ability.level_data.head_damage_bonus) {
+            skillBonuses.HEAD_COEF += ability.level_data.head_damage_bonus;
+          }
+        }
+      });
+    }
+    
+    // 5. Коэффициенты из БД
+    const KD_COEF = getCoef('KD_COEF') || 25;
+    const TD_COEF = getCoef('TD_COEF') || 10;
+    const SUB_COEF = getCoef('SUB_COEF') || 15;
+    const HEAD_COEF = getCoef('HEAD_COEF') || 1;
+    const BODY_COEF = getCoef('BODY_COEF') || 0.9;
+    const LEG_COEF = getCoef('LEG_COEF') || 0.8;
+    
+    // 6. Для каждого бойца собираем детальную информацию
     const fightersDetails = selections.map((selection, idx) => {
       const fighterData = fightersData?.find(f => f.fighter_name === selection.fighter.Fighter);
       const enhancedCard = enhancedCards[idx];
@@ -2073,13 +2104,6 @@ app.post('/api/fighters/calculate-details', authenticate, async (req, res) => {
         else if (method.includes('SUB')) subBonus = getCoef('SUB_BONUS_WIN') || 35;
       }
       
-      const KD_COEF = getCoef('KD_COEF') || 25;
-      const TD_COEF = getCoef('TD_COEF') || 10;
-      const SUB_COEF = getCoef('SUB_COEF') || 15;
-      const HEAD_COEF = getCoef('HEAD_COEF') || 1;
-      const BODY_COEF = getCoef('BODY_COEF') || 0.9;
-      const LEG_COEF = getCoef('LEG_COEF') || 0.8;
-      
       // Базовые компоненты
       const baseComponents = {
         weightCoef: weightCoef,
@@ -2094,25 +2118,39 @@ app.post('/api/fighters/calculate-details', authenticate, async (req, res) => {
         legDamage: Math.round(leg * LEG_COEF * weightCoef * wkCoef)
       };
       
-      // PvP компоненты (берём из enhancedCard)
+      // Определяем стиль бойца
+      const fighterStyle = getFighterStyle(
+        safeNumber(selection.fighter.Str),
+        safeNumber(selection.fighter.Td),
+        safeNumber(selection.fighter.Sub)
+      );
+      
+      // Стилевой коэффициент для PvP
+      let pvpStyleCoef = 1.0;
+      if (fighterStyle === 'striker') {
+        pvpStyleCoef = 1 + skillBonuses.STYLE_STRIKER / 100;
+      } else if (fighterStyle === 'grappler') {
+        pvpStyleCoef = 1 + skillBonuses.STYLE_GRAPPLER / 100;
+      } else if (fighterStyle === 'universal') {
+        pvpStyleCoef = 1 + (skillBonuses.STYLE_STRIKER + skillBonuses.STYLE_GRAPPLER) / 100;
+      }
+      
+      // Head коэффициент с учётом бонуса
+      const headCoefPvP = HEAD_COEF * (1 + skillBonuses.HEAD_COEF / 100);
+      
+      // PvP компоненты
       const pvpComponents = {
         weightCoef: weightCoef,
         wkCoef: wkCoef,
         kdBonus: kdBonus,
         subBonus: subBonus,
-        kdDamage: 0,
-        tdDamage: 0,
-        subDamage: 0,
-        headDamage: 0,
-        bodyDamage: 0,
-        legDamage: 0
+        kdDamage: Math.round(kd * KD_COEF * weightCoef * wkCoef * pvpStyleCoef),
+        tdDamage: Math.round(td * TD_COEF * weightCoef * wkCoef * pvpStyleCoef),
+        subDamage: Math.round(sub * SUB_COEF * weightCoef * wkCoef * pvpStyleCoef),
+        headDamage: Math.round(head * headCoefPvP * weightCoef * wkCoef * pvpStyleCoef),
+        bodyDamage: Math.round(body * BODY_COEF * weightCoef * wkCoef * pvpStyleCoef),
+        legDamage: Math.round(leg * LEG_COEF * weightCoef * wkCoef * pvpStyleCoef)
       };
-      
-      // Если есть enhancedCard, разбираем её компоненты
-      if (enhancedCard && enhancedCard.fighter['Total Damage'] !== selection.fighter['Total Damage']) {
-        // Здесь нужно получить отдельные компоненты из PvP расчёта
-        // Для простоты пока оставим так, при детальной реализации добавим
-      }
       
       return {
         fighter: {
@@ -2129,11 +2167,7 @@ app.post('/api/fighters/calculate-details', authenticate, async (req, res) => {
           str: safeNumber(fighterData.str),
           totalDamage: selection.fighter['Total Damage']
         },
-        style: getFighterStyle(
-          safeNumber(selection.fighter.Str),
-          safeNumber(selection.fighter.Td),
-          safeNumber(selection.fighter.Sub)
-        ),
+        style: fighterStyle,
         baseDamage: {
           total: selection.fighter['Total Damage'] || 0,
           components: baseComponents
