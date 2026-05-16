@@ -1841,6 +1841,75 @@ app.post('/api/abilities/learn', authenticate, async (req, res) => {
   }
 });
 
+
+// ---------- РАСЧЁТ PVP УРОНА ДЛЯ АКТИВНЫХ ТУРНИРОВ ----------
+app.post('/api/user/pvp-damage', authenticate, async (req, res) => {
+  try {
+    const { tournamentIds, selections } = req.body;
+    const userId = req.user.userId;
+    
+    if (!tournamentIds || !selections) {
+      return res.status(400).json({ error: 'Invalid request' });
+    }
+    
+    // Загружаем способности пользователя
+    const { data: userAbilitiesData } = await supabase
+      .from('user_abilities')
+      .select(`ability_id, current_level, abilities!inner (id, name, style, type, max_level)`)
+      .eq('user_id', userId)
+      .gt('current_level', 0);
+    
+    let userAbilities = [];
+    if (userAbilitiesData && userAbilitiesData.length > 0) {
+      const abilityIds = userAbilitiesData.map(ua => ua.ability_id);
+      const { data: levels } = await supabase
+        .from('ability_levels')
+        .select('*')
+        .in('ability_id', abilityIds);
+      
+      userAbilities = userAbilitiesData.map(ua => ({
+        ...ua.abilities,
+        current_level: ua.current_level,
+        level_data: levels?.find(l => l.ability_id === ua.ability_id && l.level === ua.current_level) || null
+      }));
+    }
+    
+    const result = {};
+    
+    for (const tournamentId of tournamentIds) {
+      const selectionsArray = selections[tournamentId];
+      if (!selectionsArray || selectionsArray.length === 0) continue;
+      
+      const fighterNames = selectionsArray.map(s => s.fighter.Fighter);
+      const { data: fightersData } = await supabase
+        .from('fighters')
+        .select('*')
+        .eq('tournament_id', parseInt(tournamentId))
+        .in('fighter_name', fighterNames);
+      
+      const { cards: enhancedCards } = applyPassiveAbilities(
+        selectionsArray.map(sel => ({ ...sel, fighter: { ...sel.fighter } })),
+        userAbilities,
+        fightersData
+      );
+      
+      const totalPvpDamage = enhancedCards.reduce((sum, card) => sum + (card.fighter['Total Damage'] || 0), 0);
+      const perFighterPvpDamage = enhancedCards.map(card => card.fighter['Total Damage'] || 0);
+      
+      result[tournamentId] = {
+        total: totalPvpDamage,
+        perFighter: perFighterPvpDamage
+      };
+    }
+    
+    res.json(result);
+  } catch (err) {
+    console.error('❌ Error calculating PvP damage:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
 // ---------- РЕЙТИНГОВЫЕ ЛИГИ ----------
 
 // Получение конфигурации всех лиг
