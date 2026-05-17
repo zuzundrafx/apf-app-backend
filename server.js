@@ -1971,7 +1971,7 @@ app.get('/api/ranking-tiers/progress', authenticate, async (req, res) => {
         user_id: userId,
         tournament_id: parseInt(tournament_id),
         tier_name: config.tier_name,
-        tier_levels_remaining: config.tier_name.endsWith('_contenders') ? 0 : config.tier_levels,
+        //tier_levels_remaining: config.tier_name.endsWith('_contenders') ? 0 : config.tier_levels,
         ranking_points: 0
       }));
       
