@@ -512,13 +512,22 @@ app.post('/api/tournaments/sync', async (req, res) => {
       dbTournament = newT;
       console.log(`🆕 Created tournament id=${dbTournament.id}`);
     } else {
-      const newStatus = is_completed ? 'completed' : 'upcoming';
-      if (dbTournament.status !== newStatus) {
-        await supabase.from('tournaments').update({ status: newStatus }).eq('id', dbTournament.id);
-        dbTournament.status = newStatus;
-      }
-      console.log(`♻️ Existing tournament id=${dbTournament.id}, status=${dbTournament.status}`);
+  const newStatus = is_completed ? 'completed' : 'upcoming';
+  if (dbTournament.status !== newStatus) {
+    const { error: updateError } = await supabase
+      .from('tournaments')
+      .update({ status: newStatus })
+      .eq('id', dbTournament.id);
+    
+    if (updateError) {
+      console.error(`❌ Failed to update tournament status:`, updateError);
+    } else {
+      console.log(`✅ Status updated: ${dbTournament.status} -> ${newStatus}`);
+      dbTournament.status = newStatus;
     }
+  }
+  console.log(`♻️ Existing tournament id=${dbTournament.id}, status=${dbTournament.status}`);
+}
 
     let insertedCount = 0;
     for (const f of fighters) {
