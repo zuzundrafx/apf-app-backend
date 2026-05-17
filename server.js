@@ -494,6 +494,59 @@ app.get('/api/leaderboard/:tournamentId', async (req, res) => {
   }
 });
 
+// ---------- ЛИДЕРБОРД ПО ЛИГАМ (PRO/ELITE/LEGEND) ----------
+app.get('/api/leaderboard/:tournamentId/:tierName', async (req, res) => {
+  try {
+    const tournamentId = parseInt(req.params.tournamentId);
+    const { tierName } = req.params;
+    
+    if (isNaN(tournamentId)) {
+      return res.status(400).json({ error: 'Invalid tournament id' });
+    }
+    
+    const validTiers = ['ufc_pro', 'ufc_elite', 'ufc_legend'];
+    if (!validTiers.includes(tierName)) {
+      return res.status(400).json({ error: 'Invalid tier name' });
+    }
+    
+    const { data: progress, error: progressError } = await supabase
+      .from('user_league_progress')
+      .select('user_id, ranking_points')
+      .eq('tournament_id', tournamentId)
+      .eq('tier_name', tierName)
+      .order('ranking_points', { ascending: false })
+      .limit(100);
+    
+    if (progressError) throw progressError;
+    
+    const userIds = progress.map(p => p.user_id);
+    
+    const { data: users, error: usersError } = await supabase
+      .from('users')
+      .select('id, username, style')
+      .in('id', userIds);
+    
+    if (usersError) throw usersError;
+    
+    const userMap = new Map(users.map(u => [u.id, { username: u.username, style: u.style }]));
+    
+    const leaderboard = progress.map((item, index) => ({
+      rank: index + 1,
+      userId: item.user_id,
+      username: userMap.get(item.user_id)?.username || 'Unknown',
+      style: userMap.get(item.user_id)?.style || null,
+      totalDamage: item.ranking_points,
+      timestamp: null
+    }));
+    
+    res.json(leaderboard);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
 // ---------- СИНХРОНИЗАЦИЯ ОТ ПАРСЕРА ----------
 app.post('/api/tournaments/sync', async (req, res) => {
   try {
