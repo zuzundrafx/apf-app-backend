@@ -475,7 +475,7 @@ app.get('/api/leaderboard/:tournamentId', async (req, res) => {
 
     const userIds = bets.map(b => b.user_id);
     const { data: users } = await supabase
-  .from('users').select('id, username, style').in('id', userIds);
+  .from('users').select('id, username, style, level').in('id', userIds);
 
     const userMap = new Map(users.map(u => [u.id, u.username]));
 
@@ -484,6 +484,7 @@ app.get('/api/leaderboard/:tournamentId', async (req, res) => {
       userId: bet.user_id,
       username: userMap.get(bet.user_id) || 'Unknown',
       style: users.find(u => u.id === bet.user_id)?.style || null,
+      level: users.find(u => u.id === bet.user_id)?.level || 1,
       totalDamage: bet.total_damage,
       timestamp: bet.created_at
     }));
