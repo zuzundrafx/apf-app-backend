@@ -514,6 +514,7 @@ app.get('/api/leaderboard/:tournamentId/:tierName', async (req, res) => {
       .select('user_id, ranking_points')
       .eq('tournament_id', tournamentId)
       .eq('tier_name', tierName)
+      .gt('ranking_points', 0)
       .order('ranking_points', { ascending: false })
       .limit(100);
     
