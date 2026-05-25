@@ -524,18 +524,19 @@ app.get('/api/leaderboard/:tournamentId/:tierName', async (req, res) => {
     
     const { data: users, error: usersError } = await supabase
       .from('users')
-      .select('id, username, style')
+      .select('id, username, style, level')
       .in('id', userIds);
     
     if (usersError) throw usersError;
     
-    const userMap = new Map(users.map(u => [u.id, { username: u.username, style: u.style }]));
+    const userMap = new Map(users.map(u => [u.id, { username: u.username, style: u.style, level: u.level }]));
     
     const leaderboard = progress.map((item, index) => ({
       rank: index + 1,
       userId: item.user_id,
       username: userMap.get(item.user_id)?.username || 'Unknown',
       style: userMap.get(item.user_id)?.style || null,
+      level: userMap.get(item.user_id)?.level || 1,
       totalDamage: item.ranking_points,
       timestamp: null
     }));
