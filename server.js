@@ -529,6 +529,19 @@ app.get('/api/leaderboard/:tournamentId/:tierName', async (req, res) => {
       .in('id', userIds);
     
     if (usersError) throw usersError;
+
+    // НОВЫЙ ЗАПРОС: получаем PvP урон (total_damage из bets)
+    const { data: bets } = await supabase
+      .from('bets')
+      .select('user_id, total_damage')
+      .eq('tournament_id', tournamentId)
+      .eq('cancelled', false)
+      .in('user_id', userIds);
+    
+    const betDamageMap = new Map();
+    bets?.forEach(bet => {
+      betDamageMap.set(bet.user_id, bet.total_damage);
+    });
     
     const userMap = new Map(users.map(u => [u.id, { username: u.username, style: u.style, level: u.level }]));
     
@@ -539,6 +552,7 @@ app.get('/api/leaderboard/:tournamentId/:tierName', async (req, res) => {
       style: userMap.get(item.user_id)?.style || null,
       level: userMap.get(item.user_id)?.level || 1,
       totalDamage: item.ranking_points,
+      pvpDamage: betDamageMap.get(item.user_id) || 0,  
       timestamp: null
     }));
     
