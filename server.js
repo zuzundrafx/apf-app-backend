@@ -308,20 +308,23 @@ app.get('/api/bets/user/:userId/tournament/:tournamentId', async (req, res) => {
     const { userId, tournamentId } = req.params;
     console.log(`🔍 [DEBUG] Looking for bet: userId=${userId}, tournamentId=${tournamentId}`);
     
+    // Получаем последнюю активную ставку (без .limit(1) и .maybeSingle)
     const { data, error } = await supabase
       .from('bets')
       .select('*')
       .eq('user_id', userId)
       .eq('tournament_id', parseInt(tournamentId))
-      .eq('cancelled', false)  // ← ТОЛЬКО НЕОТМЕНЁННЫЕ
-      .order('created_at', { ascending: false })  // ← СНАЧАЛА СВЕЖИЕ
-      .limit(1)  // ← ТОЛЬКО ОДНУ
-      .maybeSingle();  // ← МОЖЕТ БЫТЬ 0 ИЛИ 1
+      .eq('cancelled', false)
+      .order('created_at', { ascending: false })
+      .limit(1);
     
-    console.log(`🔍 [DEBUG] Found:`, data ? 'YES' : 'NO');
+    console.log(`🔍 [DEBUG] Found:`, data && data.length > 0 ? 'YES' : 'NO');
     
     if (error) throw error;
-    res.json(data || null);
+    
+    // Возвращаем первую запись или null
+    const result = data && data.length > 0 ? data[0] : null;
+    res.json(result);
   } catch (err) {
     console.error('❌ [DEBUG] Error:', err);
     res.status(500).json({ error: err.message });
