@@ -537,27 +537,93 @@ app.get('/api/leaderboard/:tournamentId/:tierName', async (req, res) => {
     
     const userIds = progress.map(p => p.user_id);
     
+    // Загружаем пользователей
     const { data: users, error: usersError } = await supabase
       .from('users')
       .select('id, username, style, level')
       .in('id', userIds);
     
     if (usersError) throw usersError;
-
-    // НОВЫЙ ЗАПРОС: получаем PvP урон (total_damage из bets)
+    
+    // Загружаем ставки пользователей
     const { data: bets } = await supabase
       .from('bets')
-      .select('user_id, total_damage')
+      .select('user_id, selections, total_damage')
       .eq('tournament_id', tournamentId)
       .eq('cancelled', false)
       .in('user_id', userIds);
     
-    const betDamageMap = new Map();
-    bets?.forEach(bet => {
-      betDamageMap.set(bet.user_id, bet.total_damage);
+    // Загружаем способности пользователей
+    const { data: userAbilitiesData } = await supabase
+      .from('user_abilities')
+      .select(`user_id, ability_id, current_level, abilities!inner (id, name, style, type, max_level)`)
+      .in('user_id', userIds)
+      .gt('current_level', 0);
+    
+    // Загружаем уровни способностей
+    const abilityIds = userAbilitiesData?.map(ua => ua.ability_id) || [];
+    const { data: abilityLevels } = await supabase
+      .from('ability_levels')
+      .select('*')
+      .in('ability_id', abilityIds);
+    
+    // Группируем способности по пользователям
+    const userAbilitiesMap = new Map();
+    userAbilitiesData?.forEach(ua => {
+      if (!userAbilitiesMap.has(ua.user_id)) {
+        userAbilitiesMap.set(ua.user_id, []);
+      }
+      const levelData = abilityLevels?.find(l => l.ability_id === ua.ability_id && l.level === ua.current_level);
+      userAbilitiesMap.get(ua.user_id).push({
+        ...ua.abilities,
+        current_level: ua.current_level,
+        level_data: levelData || null
+      });
     });
     
-    const userMap = new Map(users.map(u => [u.id, { username: u.username, style: u.style, level: u.level }]));
+    // Загружаем данные бойцов для всех карт
+    const allFighterNames = [];
+    bets?.forEach(bet => {
+      bet.selections?.forEach(sel => {
+        allFighterNames.push(sel.fighter.Fighter);
+      });
+    });
+    
+    const { data: fightersData } = await supabase
+      .from('fighters')
+      .select('*')
+      .eq('tournament_id', tournamentId)
+      .in('fighter_name', [...new Set(allFighterNames)]);
+    
+    // Рассчитываем PvP урон для каждого пользователя
+    const pvpDamageMap = new Map();
+    
+    for (const bet of bets || []) {
+      const userAbilities = userAbilitiesMap.get(bet.user_id) || [];
+      const selections = bet.selections || [];
+      
+      if (selections.length === 0) {
+        pvpDamageMap.set(bet.user_id, 0);
+        continue;
+      }
+      
+      // Применяем пассивные способности
+      const { cards: enhancedCards } = applyPassiveAbilities(
+        selections.map(sel => ({ ...sel, fighter: { ...sel.fighter } })),
+        userAbilities,
+        fightersData
+      );
+      
+      // Суммируем PvP урон
+      const totalPvpDamage = enhancedCards.reduce((sum, card) => sum + (card.fighter['Total Damage'] || 0), 0);
+      pvpDamageMap.set(bet.user_id, totalPvpDamage);
+    }
+    
+    const userMap = new Map(users.map(u => [u.id, { 
+      username: u.username, 
+      style: u.style, 
+      level: u.level 
+    }]));
     
     const leaderboard = progress.map((item, index) => ({
       rank: index + 1,
@@ -566,7 +632,7 @@ app.get('/api/leaderboard/:tournamentId/:tierName', async (req, res) => {
       style: userMap.get(item.user_id)?.style || null,
       level: userMap.get(item.user_id)?.level || 1,
       totalDamage: item.ranking_points,
-      pvpDamage: betDamageMap.get(item.user_id) || 0,  
+      pvpDamage: pvpDamageMap.get(item.user_id) || 0,
       timestamp: null
     }));
     
