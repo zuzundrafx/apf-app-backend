@@ -306,13 +306,21 @@ app.get('/api/bets/user/:userId', async (req, res) => {
 app.get('/api/bets/user/:userId/tournament/:tournamentId', async (req, res) => {
   try {
     const { userId, tournamentId } = req.params;
+    console.log(`🔍 [DEBUG] Looking for bet: userId=${userId}, tournamentId=${tournamentId}`);
+    
     const { data, error } = await supabase
-      .from('bets').select('*')
-      .eq('user_id', userId).eq('tournament_id', tournamentId).single();
-    if (error && error.code !== 'PGRST116') throw error;
+      .from('bets')
+      .select('*')
+      .eq('user_id', userId)
+      .eq('tournament_id', tournamentId)
+      .maybeSingle(); // используем maybeSingle вместо single
+    
+    console.log(`🔍 [DEBUG] Found:`, data ? 'YES' : 'NO');
+    
+    if (error) throw error;
     res.json(data || null);
   } catch (err) {
-    console.error(err);
+    console.error('❌ [DEBUG] Error:', err);
     res.status(500).json({ error: err.message });
   }
 });
