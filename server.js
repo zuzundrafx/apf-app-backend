@@ -312,8 +312,11 @@ app.get('/api/bets/user/:userId/tournament/:tournamentId', async (req, res) => {
       .from('bets')
       .select('*')
       .eq('user_id', userId)
-      .eq('tournament_id', tournamentId)
-      .maybeSingle(); // используем maybeSingle вместо single
+      .eq('tournament_id', parseInt(tournamentId))
+      .eq('cancelled', false)  // ← ТОЛЬКО НЕОТМЕНЁННЫЕ
+      .order('created_at', { ascending: false })  // ← СНАЧАЛА СВЕЖИЕ
+      .limit(1)  // ← ТОЛЬКО ОДНУ
+      .maybeSingle();  // ← МОЖЕТ БЫТЬ 0 ИЛИ 1
     
     console.log(`🔍 [DEBUG] Found:`, data ? 'YES' : 'NO');
     
