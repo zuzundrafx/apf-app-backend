@@ -553,15 +553,21 @@ app.get('/api/leaderboard/:tournamentId/:tierName', async (req, res) => {
       .eq('cancelled', false)
       .in('user_id', userIds);
     
-    // Загружаем способности пользователей
+    // Загружаем способности пользователей (ПРАВИЛЬНЫЙ СПОСОБ)
     const { data: userAbilitiesData } = await supabase
       .from('user_abilities')
-      .select(`user_id, ability_id, current_level, abilities!inner (id, name, style, type, max_level)`)
+      .select('user_id, ability_id, current_level')
       .in('user_id', userIds)
       .gt('current_level', 0);
     
+    // Загружаем информацию о способностях
+    const abilityIds = [...new Set(userAbilitiesData?.map(ua => ua.ability_id) || [])];
+    const { data: abilitiesInfo } = await supabase
+      .from('abilities')
+      .select('*')
+      .in('id', abilityIds);
+    
     // Загружаем уровни способностей
-    const abilityIds = userAbilitiesData?.map(ua => ua.ability_id) || [];
     const { data: abilityLevels } = await supabase
       .from('ability_levels')
       .select('*')
@@ -573,27 +579,37 @@ app.get('/api/leaderboard/:tournamentId/:tierName', async (req, res) => {
       if (!userAbilitiesMap.has(ua.user_id)) {
         userAbilitiesMap.set(ua.user_id, []);
       }
+      const ability = abilitiesInfo?.find(a => a.id === ua.ability_id);
       const levelData = abilityLevels?.find(l => l.ability_id === ua.ability_id && l.level === ua.current_level);
-      userAbilitiesMap.get(ua.user_id).push({
-        ...ua.abilities,
-        current_level: ua.current_level,
-        level_data: levelData || null
-      });
+      if (ability) {
+        userAbilitiesMap.get(ua.user_id).push({
+          ...ability,
+          current_level: ua.current_level,
+          level_data: levelData || null
+        });
+      }
     });
     
     // Загружаем данные бойцов для всех карт
     const allFighterNames = [];
     bets?.forEach(bet => {
       bet.selections?.forEach(sel => {
-        allFighterNames.push(sel.fighter.Fighter);
+        if (sel?.fighter?.Fighter) {
+          allFighterNames.push(sel.fighter.Fighter);
+        }
       });
     });
     
-    const { data: fightersData } = await supabase
-      .from('fighters')
-      .select('*')
-      .eq('tournament_id', tournamentId)
-      .in('fighter_name', [...new Set(allFighterNames)]);
+    const uniqueFighterNames = [...new Set(allFighterNames)];
+    let fightersData = [];
+    if (uniqueFighterNames.length > 0) {
+      const { data: fighters } = await supabase
+        .from('fighters')
+        .select('*')
+        .eq('tournament_id', tournamentId)
+        .in('fighter_name', uniqueFighterNames);
+      fightersData = fighters || [];
+    }
     
     // Рассчитываем PvP урон для каждого пользователя
     const pvpDamageMap = new Map();
@@ -636,9 +652,11 @@ app.get('/api/leaderboard/:tournamentId/:tierName', async (req, res) => {
       timestamp: null
     }));
     
+    console.log(`📊 Leaderboard for ${tierName}:`, leaderboard.slice(0, 3).map(l => ({ username: l.username, pvpDamage: l.pvpDamage })));
+    
     res.json(leaderboard);
   } catch (err) {
-    console.error(err);
+    console.error('❌ Leaderboard error:', err);
     res.status(500).json({ error: err.message });
   }
 });
