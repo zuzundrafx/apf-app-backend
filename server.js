@@ -2434,25 +2434,6 @@ app.post('/api/fighters/calculate-details', authenticate, async (req, res) => {
 
 // ---------- СПИСОК БОЙЦОВ UFC ----------
 
-// Получить всех бойцов
-app.get('/api/ufc-fighters/list', async (req, res) => {
-  try {
-    const { data, error } = await supabase
-      .from('ufc_fighters_list')
-      .select('full_name, first_name, last_name')
-      .order('full_name')
-      .limit(10000);  // увеличиваем лимит до 10000
-    
-    if (error) throw error;
-    res.json(data);
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// Синхронизация списка бойцов (очистка и полная замена)
-// Синхронизация списка бойцов (только вставка, без очистки)
 // Получить всех бойцов (с пагинацией)
 app.get('/api/ufc-fighters/list', async (req, res) => {
   try {
