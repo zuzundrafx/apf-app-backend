@@ -2502,4 +2502,290 @@ app.get('/api/ufc-fighters/count', async (req, res) => {
   }
 });
 
+// ========== МАГАЗИН ==========
+
+// Получить информацию о кардпаке для лиги
+app.get('/api/shop/card-pack/:league', authenticate, async (req, res) => {
+  try {
+    const { league } = req.params;
+    const userId = req.user.userId;
+    
+    // Получаем конфигурацию предмета
+    const itemName = `${league.toUpperCase()} Card Pack`;
+    const { data: packConfig, error: configError } = await supabase
+      .from('payments_card_packs')
+      .select('*')
+      .eq('item_name', itemName)
+      .single();
+    
+    if (configError || !packConfig) {
+      return res.status(404).json({ error: 'Card pack not found' });
+    }
+    
+    // Получаем последний завершённый турнир для лиги
+    const { data: tournament, error: tournamentError } = await supabase
+      .from('tournaments')
+      .select('id, name, date')
+      .eq('league', league)
+      .eq('status', 'completed')
+      .order('date', { ascending: false })
+      .limit(1)
+      .single();
+    
+    if (tournamentError || !tournament) {
+      return res.status(404).json({ error: 'No active tournament found for this league' });
+    }
+    
+    // Получаем историю покупок пользователя
+    const { data: userPurchase, error: purchaseError } = await supabase
+      .from('user_purchases')
+      .select('*')
+      .eq('user_id', userId)
+      .eq('item_name', itemName)
+      .single();
+    
+    // Рассчитываем текущую цену и перезарядку
+    let currentPrice = packConfig.item_price;
+    let reloadSecondsLeft = 0;
+    let canPurchase = true;
+    
+    if (userPurchase) {
+      const lastPurchase = new Date(userPurchase.last_purchase_time);
+      const now = new Date();
+      const reloadMinutes = packConfig.item_reload_time;
+      const reloadMs = reloadMinutes * 60 * 1000;
+      const timeSinceLastPurchase = now - lastPurchase;
+      
+      if (timeSinceLastPurchase < reloadMs) {
+        // Перезарядка активна — цена удваивается
+        currentPrice = userPurchase.current_price * 2;
+        reloadSecondsLeft = Math.ceil((reloadMs - timeSinceLastPurchase) / 1000);
+        canPurchase = true; // Можно купить, но дороже
+      } else {
+        // Перезарядка истекла — цена начальная
+        currentPrice = packConfig.item_price;
+      }
+    }
+    
+    res.json({
+      itemName: packConfig.item_name,
+      itemInfo: packConfig.item_info,
+      basePrice: packConfig.item_price,
+      currentPrice: currentPrice,
+      reloadTimeMinutes: packConfig.item_reload_time,
+      reloadSecondsLeft: reloadSecondsLeft,
+      canPurchase: canPurchase,
+      tournament: {
+        id: tournament.id,
+        name: tournament.name
+      }
+    });
+  } catch (err) {
+    console.error('❌ Error getting card pack info:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Покупка кардпака
+app.post('/api/shop/purchase-card-pack', authenticate, async (req, res) => {
+  try {
+    const { league, itemName, price } = req.body;
+    const userId = req.user.userId;
+    
+    // 1. Проверяем баланс пользователя
+    const { data: user, error: userError } = await supabase
+      .from('users')
+      .select('coins')
+      .eq('id', userId)
+      .single();
+    
+    if (userError) throw userError;
+    if (user.coins < price) {
+      return res.status(400).json({ error: 'Not enough coins' });
+    }
+    
+    // 2. Получаем конфигурацию предмета
+    const fullItemName = `${league.toUpperCase()} Card Pack`;
+    const { data: packConfig, error: configError } = await supabase
+      .from('payments_card_packs')
+      .select('*')
+      .eq('item_name', fullItemName)
+      .single();
+    
+    if (configError || !packConfig) {
+      return res.status(404).json({ error: 'Card pack not found' });
+    }
+    
+    // 3. Получаем последний завершённый турнир для лиги
+    const { data: tournament, error: tournamentError } = await supabase
+      .from('tournaments')
+      .select('id, name')
+      .eq('league', league)
+      .eq('status', 'completed')
+      .order('date', { ascending: false })
+      .limit(1)
+      .single();
+    
+    if (tournamentError || !tournament) {
+      return res.status(404).json({ error: 'No active tournament found' });
+    }
+    
+    // 4. Получаем все весовые категории и бойцов турнира
+    const { data: fighters, error: fightersError } = await supabase
+      .from('fighters')
+      .select('fighter_name, weight_class')
+      .eq('tournament_id', tournament.id);
+    
+    if (fightersError) throw fightersError;
+    
+    // Группируем бойцов по весовым категориям
+    const fightersByWeight = {};
+    fighters.forEach(fighter => {
+      if (!fightersByWeight[fighter.weight_class]) {
+        fightersByWeight[fighter.weight_class] = [];
+      }
+      fightersByWeight[fighter.weight_class].push(fighter);
+    });
+    
+    const weightClasses = Object.keys(fightersByWeight);
+    if (weightClasses.length < 5) {
+      return res.status(400).json({ error: 'Not enough weight classes in tournament' });
+    }
+    
+    // 5. Выбираем 5 случайных весовых категорий
+    const shuffledWeightClasses = [...weightClasses];
+    for (let i = shuffledWeightClasses.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [shuffledWeightClasses[i], shuffledWeightClasses[j]] = [shuffledWeightClasses[j], shuffledWeightClasses[i]];
+    }
+    const selectedWeightClasses = shuffledWeightClasses.slice(0, 5);
+    
+    // 6. Для каждой категории выбираем случайного бойца
+    const selections = [];
+    for (const weightClass of selectedWeightClasses) {
+      const weightFighters = fightersByWeight[weightClass];
+      const randomIndex = Math.floor(Math.random() * weightFighters.length);
+      const selectedFighter = weightFighters[randomIndex];
+      
+      // Получаем полные данные бойца
+      const { data: fighterData, error: fighterDataError } = await supabase
+        .from('fighters')
+        .select('*')
+        .eq('tournament_id', tournament.id)
+        .eq('fighter_name', selectedFighter.fighter_name)
+        .single();
+      
+      if (fighterDataError) throw fighterDataError;
+      
+      selections.push({
+        weightClass: weightClass,
+        fighter: {
+          Fighter: fighterData.fighter_name,
+          'W/L': fighterData.wl,
+          'Total Damage': fighterData.total_damage,
+          Str: fighterData.str,
+          Td: fighterData.td,
+          Sub: fighterData.sub,
+          Method: fighterData.method,
+          Round: fighterData.round,
+          Time: fighterData.time,
+          Head: fighterData.head,
+          Body: fighterData.body,
+          Leg: fighterData.leg,
+          Kd: fighterData.kd
+        }
+      });
+    }
+    
+    // 7. Обновляем или создаём ставку
+    const { data: existingBet } = await supabase
+      .from('bets')
+      .select('id')
+      .eq('user_id', userId)
+      .eq('tournament_id', tournament.id)
+      .eq('cancelled', false)
+      .maybeSingle();
+    
+    const totalDamage = selections.reduce((sum, sel) => sum + (sel.fighter['Total Damage'] || 0), 0);
+    
+    if (existingBet) {
+      // Обновляем существующую ставку
+      await supabase
+        .from('bets')
+        .update({
+          selections: selections,
+          total_damage: totalDamage,
+          bet_amount: 0,  // Ставка не из монет, а из покупки
+          updated_at: new Date()
+        })
+        .eq('id', existingBet.id);
+    } else {
+      // Создаём новую ставку
+      await supabase
+        .from('bets')
+        .insert({
+          user_id: userId,
+          tournament_id: tournament.id,
+          bet_amount: 0,
+          total_damage: totalDamage,
+          selections: selections,
+          cancelled: false,
+          reward_accepted: false,
+          rewards_created: false
+        });
+    }
+    
+    // 8. Списаем монеты
+    await supabase
+      .from('users')
+      .update({ coins: user.coins - price })
+      .eq('id', userId);
+    
+    // 9. Обновляем историю покупок
+    const now = new Date();
+    const { data: existingPurchase } = await supabase
+      .from('user_purchases')
+      .select('*')
+      .eq('user_id', userId)
+      .eq('item_name', fullItemName)
+      .maybeSingle();
+    
+    if (existingPurchase) {
+      await supabase
+        .from('user_purchases')
+        .update({
+          last_purchase_time: now,
+          current_price: price,
+          purchase_count: existingPurchase.purchase_count + 1,
+          tournament_id: tournament.id
+        })
+        .eq('id', existingPurchase.id);
+    } else {
+      await supabase
+        .from('user_purchases')
+        .insert({
+          user_id: userId,
+          item_name: fullItemName,
+          tournament_id: tournament.id,
+          last_purchase_time: now,
+          current_price: price,
+          purchase_count: 1
+        });
+    }
+    
+    // 10. Возвращаем результат
+    res.json({
+      success: true,
+      newCoins: user.coins - price,
+      selections: selections,
+      tournamentName: tournament.name
+    });
+  } catch (err) {
+    console.error('❌ Error purchasing card pack:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
+
 app.listen(port, () => console.log(`Server running on port ${port}`));
