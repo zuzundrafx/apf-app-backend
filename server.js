@@ -661,7 +661,6 @@ app.get('/api/leaderboard/:tournamentId/:tierName', async (req, res) => {
   }
 });
 
-
 // ---------- СИНХРОНИЗАЦИЯ ОТ ПАРСЕРА ----------
 app.post('/api/tournaments/sync', async (req, res) => {
   try {
@@ -2428,6 +2427,78 @@ app.post('/api/fighters/calculate-details', authenticate, async (req, res) => {
     res.json({ fightersDetails, healthBonus });
   } catch (err) {
     console.error('❌ Error calculating fighter details:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ---------- СПИСОК БОЙЦОВ UFC ----------
+
+// Получить всех бойцов
+app.get('/api/ufc-fighters/list', async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('ufc_fighters_list')
+      .select('full_name, first_name, last_name')
+      .order('full_name');
+    
+    if (error) throw error;
+    res.json(data);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Синхронизация списка бойцов (очистка и полная замена)
+app.post('/api/ufc-fighters/sync', async (req, res) => {
+  try {
+    const { fighters } = req.body;
+    
+    if (!fighters || !fighters.length) {
+      return res.status(400).json({ error: 'No fighters data' });
+    }
+    
+    // Очищаем старые данные
+    const { error: deleteError } = await supabase
+      .from('ufc_fighters_list')
+      .delete()
+      .neq('id', 0);
+    
+    if (deleteError) throw deleteError;
+    
+    // Вставляем новых бойцов (разбиваем на чанки по 500)
+    const chunkSize = 500;
+    let insertedCount = 0;
+    
+    for (let i = 0; i < fighters.length; i += chunkSize) {
+      const chunk = fighters.slice(i, i + chunkSize);
+      const { error: insertError } = await supabase
+        .from('ufc_fighters_list')
+        .insert(chunk);
+      
+      if (insertError) throw insertError;
+      insertedCount += chunk.length;
+      console.log(`✅ Загружено ${insertedCount}/${fighters.length} бойцов`);
+    }
+    
+    res.json({ success: true, count: insertedCount });
+  } catch (err) {
+    console.error('❌ Ошибка синхронизации списка бойцов:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Получить количество бойцов
+app.get('/api/ufc-fighters/count', async (req, res) => {
+  try {
+    const { count, error } = await supabase
+      .from('ufc_fighters_list')
+      .select('*', { count: 'exact', head: true });
+    
+    if (error) throw error;
+    res.json({ count });
+  } catch (err) {
+    console.error(err);
     res.status(500).json({ error: err.message });
   }
 });
