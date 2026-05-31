@@ -2458,15 +2458,22 @@ app.post('/api/ufc-fighters/sync', async (req, res) => {
       return res.status(400).json({ error: 'No fighters data' });
     }
     
-    // Очищаем старые данные
+    console.log(`📥 Получено ${fighters.length} бойцов для синхронизации`);
+    
+    // 1. Очищаем таблицу полностью
     const { error: deleteError } = await supabase
       .from('ufc_fighters_list')
       .delete()
       .neq('id', 0);
     
-    if (deleteError) throw deleteError;
+    if (deleteError) {
+      console.error('❌ Ошибка очистки:', deleteError);
+      throw deleteError;
+    }
     
-    // Вставляем новых бойцов (разбиваем на чанки по 500)
+    console.log('✅ Таблица очищена');
+    
+    // 2. Вставляем новых бойцов
     const chunkSize = 500;
     let insertedCount = 0;
     
@@ -2476,9 +2483,12 @@ app.post('/api/ufc-fighters/sync', async (req, res) => {
         .from('ufc_fighters_list')
         .insert(chunk);
       
-      if (insertError) throw insertError;
+      if (insertError) {
+        console.error(`❌ Ошибка вставки чанка ${i/chunkSize + 1}:`, insertError);
+        throw insertError;
+      }
       insertedCount += chunk.length;
-      console.log(`✅ Загружено ${insertedCount}/${fighters.length} бойцов`);
+      console.log(`  ✅ Вставлено ${insertedCount}/${fighters.length} бойцов`);
     }
     
     res.json({ success: true, count: insertedCount });
