@@ -742,83 +742,84 @@ app.post('/api/tournaments/sync', async (req, res) => {
     }
         console.log(`✅ Inserted/updated ${insertedCount} fighters`);
 
-    // Удаляем бойцов, которых больше нет в данных парсера
-    const newFighterNames = fighters.map(f => f.Fighter);
-    if (newFighterNames.length > 0) {
-      const { data: existingFighters } = await supabase
-        .from('fighters')
-        .select('id, fighter_name')
-        .eq('tournament_id', dbTournament.id);
-      
-      const fightersToDelete = existingFighters?.filter(
-        f => !newFighterNames.includes(f.fighter_name)
-      ) || [];
-      
-      if (fightersToDelete.length > 0) {
-        const idsToDelete = fightersToDelete.map(f => f.id);
-        console.log(`🗑️ Removing ${idsToDelete.length} fighters no longer in tournament:`, fightersToDelete.map(f => f.fighter_name).join(', '));
-        
-        const { error: deleteError } = await supabase
-          .from('fighters')
-          .delete()
-          .in('id', idsToDelete);
-        
-        if (deleteError) {
-          console.error('Error deleting old fighters:', deleteError);
-        } else {
-          console.log(`✅ Removed ${idsToDelete.length} old fighters`);
-        }
+// ===== 1. СНАЧАЛА обрабатываем замены бойцов =====
+console.log('🔍 Checking for fighter replacements...');
+const { data: activeBets, error: betsError } = await supabase
+  .from('bets')
+  .select('*')
+  .eq('tournament_id', dbTournament.id)
+  .eq('cancelled', false);
+
+if (betsError) {
+  console.error('Error loading active bets:', betsError);
+} else if (activeBets && activeBets.length > 0) {
+  for (const bet of activeBets) {
+    if (bet.rewards_created) continue;
+    
+    const selections = bet.selections;
+    let hasReplacement = false;
+    const replacedFighters = [];
+
+    for (const sel of selections) {
+      const fighterExists = fighters.find(f => f.Fighter === sel.fighter.Fighter);
+      if (!fighterExists) {
+        hasReplacement = true;
+        replacedFighters.push({
+          originalFighter: sel.fighter.Fighter,
+          weightClass: sel.weightClass
+        });
       }
     }
 
-    // Обработка замен бойцов для ВСЕХ турниров (не только completed)
-    console.log('🔍 Checking for fighter replacements...');
-    const { data: activeBets, error: betsError } = await supabase
-      .from('bets').select('*')
-      .eq('tournament_id', dbTournament.id)
-      .eq('cancelled', false);
-
-    if (betsError) {
-      console.error('Error loading active bets:', betsError);
-    } else if (activeBets && activeBets.length > 0) {
-      for (const bet of activeBets) {
-        if (bet.rewards_created) continue;
-        
-        const selections = bet.selections;
-        let hasReplacement = false;
-        const replacedFighters = [];
-
-        for (const sel of selections) {
-          const fighterExists = fighters.find(f => f.Fighter === sel.fighter.Fighter);
-          if (!fighterExists) {
-            hasReplacement = true;
-            replacedFighters.push({
-              originalFighter: sel.fighter.Fighter,
-              weightClass: sel.weightClass
-            });
-          }
+    if (hasReplacement) {
+      console.log(`  ⚠️ Bet ${bet.id} has ${replacedFighters.length} replaced fighter(s):`, replacedFighters.map(f => f.originalFighter).join(', '));
+      
+      await supabase.from('bets').update({ cancelled: true }).eq('id', bet.id);
+      
+      await supabase.from('notifications').insert({
+        user_id: bet.user_id,
+        type: 'bet_cancelled',
+        tournament_name: dbTournament.name,
+        data: {
+          refundAmount: bet.bet_amount,
+          cancelledFighters: replacedFighters,
+          message: 'Fighter(s) have been replaced. Please make a new bet.'
         }
-
-        if (hasReplacement) {
-          console.log(`  ⚠️ Bet ${bet.id} has ${replacedFighters.length} replaced fighter(s):`, replacedFighters.map(f => f.originalFighter).join(', '));
-          
-          await supabase.from('bets').update({ cancelled: true }).eq('id', bet.id);
-          
-          await supabase.from('notifications').insert({
-            user_id: bet.user_id,
-            type: 'bet_cancelled',
-            tournament_name: dbTournament.name,
-            data: {
-              refundAmount: bet.bet_amount,
-              cancelledFighters: replacedFighters,
-              message: 'Fighter(s) have been replaced. Please make a new bet.'
-            }
-          });
-          
-          console.log(`  ✅ Bet ${bet.id} cancelled, refund: ${bet.bet_amount} coins`);
-        }
-      }
+      });
+      
+      console.log(`  ✅ Bet ${bet.id} cancelled, refund: ${bet.bet_amount} coins`);
     }
+  }
+}
+
+// ===== 2. ПОТОМ удаляем бойцов, которых больше нет =====
+const newFighterNames = fighters.map(f => f.Fighter);
+if (newFighterNames.length > 0) {
+  const { data: existingFighters } = await supabase
+    .from('fighters')
+    .select('id, fighter_name')
+    .eq('tournament_id', dbTournament.id);
+  
+  const fightersToDelete = existingFighters?.filter(
+    f => !newFighterNames.includes(f.fighter_name)
+  ) || [];
+  
+  if (fightersToDelete.length > 0) {
+    const idsToDelete = fightersToDelete.map(f => f.id);
+    console.log(`🗑️ Removing ${idsToDelete.length} fighters no longer in tournament:`, fightersToDelete.map(f => f.fighter_name).join(', '));
+    
+    const { error: deleteError } = await supabase
+      .from('fighters')
+      .delete()
+      .in('id', idsToDelete);
+    
+    if (deleteError) {
+      console.error('Error deleting old fighters:', deleteError);
+    } else {
+      console.log(`✅ Removed ${idsToDelete.length} old fighters`);
+    }
+  }
+}
 
     if (is_completed) {
       console.log('🏁 Tournament completed, processing bets...');
@@ -2452,26 +2453,37 @@ app.get('/api/ufc-fighters/list', async (req, res) => {
 
 // Синхронизация списка бойцов (очистка и полная замена)
 // Синхронизация списка бойцов (только вставка, без очистки)
-app.post('/api/ufc-fighters/sync', async (req, res) => {
+// Получить всех бойцов (с пагинацией)
+app.get('/api/ufc-fighters/list', async (req, res) => {
   try {
-    const { fighters } = req.body;
+    let allFighters = [];
+    let page = 0;
+    const pageSize = 1000;
+    let hasMore = true;
     
-    if (!fighters || !fighters.length) {
-      return res.status(400).json({ error: 'No fighters data' });
+    while (hasMore) {
+      const { data, error } = await supabase
+        .from('ufc_fighters_list')
+        .select('full_name, first_name, last_name')
+        .order('full_name')
+        .range(page * pageSize, (page + 1) * pageSize - 1);
+      
+      if (error) throw error;
+      
+      if (data && data.length > 0) {
+        allFighters = [...allFighters, ...data];
+        page++;
+      }
+      
+      if (!data || data.length < pageSize) {
+        hasMore = false;
+      }
     }
     
-    console.log(`📥 Получено ${fighters.length} бойцов для синхронизации`);
-    
-    // Просто вставляем бойцов (без очистки)
-    const { error: insertError } = await supabase
-      .from('ufc_fighters_list')
-      .insert(fighters);
-    
-    if (insertError) throw insertError;
-    
-    res.json({ success: true, count: fighters.length });
+    console.log(`📊 Загружено ${allFighters.length} бойцов из Supabase`);
+    res.json(allFighters);
   } catch (err) {
-    console.error('❌ Ошибка синхронизации списка бойцов:', err);
+    console.error('❌ Ошибка получения списка бойцов:', err);
     res.status(500).json({ error: err.message });
   }
 });
