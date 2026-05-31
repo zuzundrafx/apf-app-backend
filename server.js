@@ -2450,7 +2450,7 @@ app.get('/api/ufc-fighters/list', async (req, res) => {
 });
 
 // Синхронизация списка бойцов (очистка и полная замена)
-// Синхронизация списка бойцов (простая вставка)
+// Синхронизация списка бойцов (только вставка, без очистки)
 app.post('/api/ufc-fighters/sync', async (req, res) => {
   try {
     const { fighters } = req.body;
@@ -2461,40 +2461,34 @@ app.post('/api/ufc-fighters/sync', async (req, res) => {
     
     console.log(`📥 Получено ${fighters.length} бойцов для синхронизации`);
     
-    // Очищаем таблицу полностью
-    const { error: deleteError } = await supabase
+    // Просто вставляем бойцов (без очистки)
+    const { error: insertError } = await supabase
+      .from('ufc_fighters_list')
+      .insert(fighters);
+    
+    if (insertError) throw insertError;
+    
+    res.json({ success: true, count: fighters.length });
+  } catch (err) {
+    console.error('❌ Ошибка синхронизации списка бойцов:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Очистка таблицы бойцов (вызывается один раз перед загрузкой)
+app.post('/api/ufc-fighters/clear', async (req, res) => {
+  try {
+    const { error } = await supabase
       .from('ufc_fighters_list')
       .delete()
       .neq('id', 0);
     
-    if (deleteError) {
-      console.error('❌ Ошибка очистки:', deleteError);
-      throw deleteError;
-    }
+    if (error) throw error;
     
-    console.log('✅ Таблица очищена');
-    
-    // Вставляем новых бойцов
-    const chunkSize = 500;
-    let insertedCount = 0;
-    
-    for (let i = 0; i < fighters.length; i += chunkSize) {
-      const chunk = fighters.slice(i, i + chunkSize);
-      const { error: insertError } = await supabase
-        .from('ufc_fighters_list')
-        .insert(chunk);
-      
-      if (insertError) {
-        console.error(`❌ Ошибка вставки чанка ${i/chunkSize + 1}:`, insertError);
-        throw insertError;
-      }
-      insertedCount += chunk.length;
-      console.log(`  ✅ Вставлено ${insertedCount}/${fighters.length} бойцов`);
-    }
-    
-    res.json({ success: true, count: insertedCount });
+    console.log('✅ Таблица ufc_fighters_list очищена');
+    res.json({ success: true });
   } catch (err) {
-    console.error('❌ Ошибка синхронизации списка бойцов:', err);
+    console.error('❌ Ошибка очистки таблицы бойцов:', err);
     res.status(500).json({ error: err.message });
   }
 });
