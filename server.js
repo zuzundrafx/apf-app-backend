@@ -2439,7 +2439,8 @@ app.get('/api/ufc-fighters/list', async (req, res) => {
     const { data, error } = await supabase
       .from('ufc_fighters_list')
       .select('full_name, first_name, last_name')
-      .order('full_name');
+      .order('full_name')
+      .limit(10000);  // увеличиваем лимит до 10000
     
     if (error) throw error;
     res.json(data);
