@@ -2460,35 +2460,32 @@ app.post('/api/ufc-fighters/sync', async (req, res) => {
     
     console.log(`📥 Получено ${fighters.length} бойцов для синхронизации`);
     
-    // 1. Очищаем таблицу полностью
-    const { error: deleteError } = await supabase
-      .from('ufc_fighters_list')
-      .delete()
-      .neq('id', 0);
+    // Удаляем старые данные (опционально)
+    // const { error: deleteError } = await supabase
+    //   .from('ufc_fighters_list')
+    //   .delete()
+    //   .neq('id', 0);
     
-    if (deleteError) {
-      console.error('❌ Ошибка очистки:', deleteError);
-      throw deleteError;
-    }
-    
-    console.log('✅ Таблица очищена');
-    
-    // 2. Вставляем новых бойцов
     const chunkSize = 500;
     let insertedCount = 0;
     
     for (let i = 0; i < fighters.length; i += chunkSize) {
       const chunk = fighters.slice(i, i + chunkSize);
-      const { error: insertError } = await supabase
-        .from('ufc_fighters_list')
-        .insert(chunk);
       
-      if (insertError) {
-        console.error(`❌ Ошибка вставки чанка ${i/chunkSize + 1}:`, insertError);
-        throw insertError;
+      // Используем upsert с игнорированием конфликтов
+      const { error, data } = await supabase
+        .from('ufc_fighters_list')
+        .upsert(chunk, { 
+          onConflict: 'full_name',
+          ignoreDuplicates: true  // Игнорируем дубликаты
+        });
+      
+      if (error) {
+        console.error(`❌ Ошибка:`, error);
+        throw error;
       }
       insertedCount += chunk.length;
-      console.log(`  ✅ Вставлено ${insertedCount}/${fighters.length} бойцов`);
+      console.log(`  ✅ Обработано ${insertedCount}/${fighters.length} бойцов`);
     }
     
     res.json({ success: true, count: insertedCount });
