@@ -2743,35 +2743,45 @@ app.post('/api/shop/purchase-card-pack', authenticate, async (req, res) => {
     
     // 9. Обновляем историю покупок
     const now = new Date();
-    const { data: existingPurchase } = await supabase
-      .from('user_purchases')
-      .select('*')
-      .eq('user_id', userId)
-      .eq('item_name', fullItemName)
-      .maybeSingle();
-    
-    if (existingPurchase) {
-      await supabase
-        .from('user_purchases')
-        .update({
-          last_purchase_time: now,
-          current_price: price,
-          purchase_count: existingPurchase.purchase_count + 1,
-          tournament_id: tournament.id
-        })
-        .eq('id', existingPurchase.id);
-    } else {
-      await supabase
-        .from('user_purchases')
-        .insert({
-          user_id: userId,
-          item_name: fullItemName,
-          tournament_id: tournament.id,
-          last_purchase_time: now,
-          current_price: price,
-          purchase_count: 1
-        });
-    }
+const { data: existingPurchase } = await supabase
+  .from('user_purchases')
+  .select('*')
+  .eq('user_id', userId)
+  .eq('item_name', fullItemName)
+  .maybeSingle();
+
+// Проверяем, была ли покупка по начальной цене
+const isBasePrice = price === packConfig.item_price;
+
+if (existingPurchase) {
+  // Обновляем last_purchase_time ТОЛЬКО если покупка по начальной цене
+  const updateData = {
+    current_price: price,
+    purchase_count: existingPurchase.purchase_count + 1,
+    tournament_id: tournament.id
+  };
+  
+  if (isBasePrice) {
+    updateData.last_purchase_time = now;
+  }
+  
+  await supabase
+    .from('user_purchases')
+    .update(updateData)
+    .eq('id', existingPurchase.id);
+} else {
+  // Первая покупка всегда по начальной цене
+  await supabase
+    .from('user_purchases')
+    .insert({
+      user_id: userId,
+      item_name: fullItemName,
+      tournament_id: tournament.id,
+      last_purchase_time: now,
+      current_price: price,
+      purchase_count: 1
+    });
+}
     
     // 10. Возвращаем результат
     res.json({
