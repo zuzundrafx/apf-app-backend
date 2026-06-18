@@ -1561,6 +1561,11 @@ if (isContenders) {
       ranking_points: 0
     });
   }
+  
+  // ⬇️ ДОБАВИТЬ ЭТУ СТРОЧКУ ⬇️
+  console.log(`✅ [Tier] ${tier_name} is always open`);
+  // Contenders открыта, просто продолжаем выполнение
+  
 } else {
   // Для Pro, Elite, Legend — проверяем ПРЕДЫДУЩУЮ лигу
   const tierOrder = ['ufc_contenders', 'ufc_pro', 'ufc_elite', 'ufc_legend'];
