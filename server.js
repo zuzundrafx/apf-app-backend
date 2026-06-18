@@ -254,7 +254,7 @@ app.post('/api/bets', authenticate, async (req, res) => {
     }
 
     const { data: tournament, error: tournError } = await supabase
-      .from('tournaments').select('status').eq('id', tournamentId).single();
+      .from('tournaments').select('status, league').eq('id', tournamentId).single();
     if (tournError) throw tournError;
     if (tournament.status !== 'upcoming') {
       return res.status(400).json({ error: 'Tournament is not open for betting' });
@@ -284,6 +284,76 @@ app.post('/api/bets', authenticate, async (req, res) => {
       }]).select();
 
     if (betError) throw betError;
+
+    // ===== АВТОМАТИЧЕСКОЕ СОЗДАНИЕ ЗАПИСЕЙ В ЛИГАХ =====
+    console.log(`📊 [League] Creating league progress records for user ${userId}, tournament ${tournamentId}`);
+    
+    // Получаем конфигурацию всех лиг для этого турнира
+    const { data: tierConfigs, error: configError } = await supabase
+      .from('ranking_tiers_config')
+      .select('*')
+      .eq('league', tournament.league || 'UFC')
+      .order('sort_order');
+    
+    if (configError) {
+      console.error('❌ [League] Error loading tier configs:', configError);
+    } else if (tierConfigs && tierConfigs.length > 0) {
+      console.log(`📊 [League] Found ${tierConfigs.length} tiers for league ${tournament.league || 'UFC'}`);
+      
+      for (const config of tierConfigs) {
+        const { data: existingProgress } = await supabase
+          .from('user_league_progress')
+          .select('id')
+          .eq('user_id', userId)
+          .eq('tournament_id', tournamentId)
+          .eq('tier_name', config.tier_name)
+          .maybeSingle();
+        
+        if (!existingProgress) {
+          console.log(`📊 [League] Creating record for ${config.tier_name}`);
+          
+          const isContenders = config.tier_name === 'ufc_contenders' || config.tier_name.endsWith('_contenders');
+          const initialLevels = isContenders ? config.tier_levels : 0;
+          
+          await supabase
+            .from('user_league_progress')
+            .insert({
+              user_id: userId,
+              tournament_id: tournamentId,
+              tier_name: config.tier_name,
+              tier_levels_remaining: initialLevels,
+              ranking_points: 0
+            });
+          
+          console.log(`✅ [League] Created ${config.tier_name} record with ${initialLevels} levels remaining`);
+        }
+      }
+    } else {
+      // Если нет конфигурации - создаём хотя бы Contenders
+      console.log(`📊 [League] No tier configs found, creating default Contenders record`);
+      
+      const { data: existingContenders } = await supabase
+        .from('user_league_progress')
+        .select('id')
+        .eq('user_id', userId)
+        .eq('tournament_id', tournamentId)
+        .eq('tier_name', 'ufc_contenders')
+        .maybeSingle();
+      
+      if (!existingContenders) {
+        await supabase
+          .from('user_league_progress')
+          .insert({
+            user_id: userId,
+            tournament_id: tournamentId,
+            tier_name: 'ufc_contenders',
+            tier_levels_remaining: 3,
+            ranking_points: 0
+          });
+        console.log(`✅ [League] Created default Contenders record`);
+      }
+    }
+
     res.json({ success: true, bet: bet[0] });
   } catch (err) {
     console.error(err);
@@ -308,7 +378,6 @@ app.get('/api/bets/user/:userId/tournament/:tournamentId', async (req, res) => {
     const { userId, tournamentId } = req.params;
     console.log(`🔍 [DEBUG] Looking for bet: userId=${userId}, tournamentId=${tournamentId}`);
     
-    // Получаем последнюю активную ставку (без .limit(1) и .maybeSingle)
     const { data, error } = await supabase
       .from('bets')
       .select('*')
@@ -322,7 +391,6 @@ app.get('/api/bets/user/:userId/tournament/:tournamentId', async (req, res) => {
     
     if (error) throw error;
     
-    // Возвращаем первую запись или null
     const result = data && data.length > 0 ? data[0] : null;
     res.json(result);
   } catch (err) {
@@ -537,7 +605,6 @@ app.get('/api/leaderboard/:tournamentId/:tierName', async (req, res) => {
     
     const userIds = progress.map(p => p.user_id);
     
-    // Загружаем пользователей
     const { data: users, error: usersError } = await supabase
       .from('users')
       .select('id, username, style, level')
@@ -545,7 +612,6 @@ app.get('/api/leaderboard/:tournamentId/:tierName', async (req, res) => {
     
     if (usersError) throw usersError;
     
-    // Загружаем ставки пользователей
     const { data: bets } = await supabase
       .from('bets')
       .select('user_id, selections, total_damage')
@@ -553,27 +619,23 @@ app.get('/api/leaderboard/:tournamentId/:tierName', async (req, res) => {
       .eq('cancelled', false)
       .in('user_id', userIds);
     
-    // Загружаем способности пользователей (ПРАВИЛЬНЫЙ СПОСОБ)
     const { data: userAbilitiesData } = await supabase
       .from('user_abilities')
       .select('user_id, ability_id, current_level')
       .in('user_id', userIds)
       .gt('current_level', 0);
     
-    // Загружаем информацию о способностях
     const abilityIds = [...new Set(userAbilitiesData?.map(ua => ua.ability_id) || [])];
     const { data: abilitiesInfo } = await supabase
       .from('abilities')
       .select('*')
       .in('id', abilityIds);
     
-    // Загружаем уровни способностей
     const { data: abilityLevels } = await supabase
       .from('ability_levels')
       .select('*')
       .in('ability_id', abilityIds);
     
-    // Группируем способности по пользователям
     const userAbilitiesMap = new Map();
     userAbilitiesData?.forEach(ua => {
       if (!userAbilitiesMap.has(ua.user_id)) {
@@ -590,7 +652,6 @@ app.get('/api/leaderboard/:tournamentId/:tierName', async (req, res) => {
       }
     });
     
-    // Загружаем данные бойцов для всех карт
     const allFighterNames = [];
     bets?.forEach(bet => {
       bet.selections?.forEach(sel => {
@@ -611,7 +672,6 @@ app.get('/api/leaderboard/:tournamentId/:tierName', async (req, res) => {
       fightersData = fighters || [];
     }
     
-    // Рассчитываем PvP урон для каждого пользователя
     const pvpDamageMap = new Map();
     
     for (const bet of bets || []) {
@@ -623,14 +683,12 @@ app.get('/api/leaderboard/:tournamentId/:tierName', async (req, res) => {
         continue;
       }
       
-      // Применяем пассивные способности
       const { cards: enhancedCards } = applyPassiveAbilities(
         selections.map(sel => ({ ...sel, fighter: { ...sel.fighter } })),
         userAbilities,
         fightersData
       );
       
-      // Суммируем PvP урон
       const totalPvpDamage = enhancedCards.reduce((sum, card) => sum + (card.fighter['Total Damage'] || 0), 0);
       pvpDamageMap.set(bet.user_id, totalPvpDamage);
     }
@@ -742,7 +800,6 @@ app.post('/api/tournaments/sync', async (req, res) => {
     }
         console.log(`✅ Inserted/updated ${insertedCount} fighters`);
 
-// ===== 1. СНАЧАЛА обрабатываем замены бойцов =====
 console.log('🔍 Checking for fighter replacements...');
 const { data: activeBets, error: betsError } = await supabase
   .from('bets')
@@ -792,7 +849,6 @@ if (betsError) {
   }
 }
 
-// ===== 2. ПОТОМ удаляем бойцов, которых больше нет =====
 const newFighterNames = fighters.map(f => f.Fighter);
 if (newFighterNames.length > 0) {
   const { data: existingFighters } = await supabase
@@ -1562,7 +1618,6 @@ if (isContenders) {
     });
   }
   
-  // ⬇️ ДОБАВИТЬ ЭТУ СТРОЧКУ ⬇️
   console.log(`✅ [Tier] ${tier_name} is always open`);
   // Contenders открыта, просто продолжаем выполнение
   
@@ -1648,26 +1703,53 @@ if (isContenders) {
       return res.status(400).json({ error: 'No opponents available' });
     }
 
-    // Если указана лига — фильтруем соперников по открытой лиге
+    // Если указана лига — фильтруем соперников
     let filteredRivals = rivals;
     if (tier_name) {
-      const { data: eligibleRivals } = await supabase
-        .from('user_league_progress')
-        .select('user_id')
-        .eq('tournament_id', tournamentId)
-        .eq('tier_name', tier_name)
-        .eq('tier_levels_remaining', 0)
-        .neq('user_id', userId);
+      const isContenders = tier_name === 'ufc_contenders' || tier_name.endsWith('_contenders');
       
-      const eligibleIds = eligibleRivals?.map(r => r.user_id) || [];
-      filteredRivals = rivals.filter(r => eligibleIds.includes(r.user_id));
+      if (isContenders) {
+        // ДЛЯ CONTENDERS: выбираем ВСЕХ игроков с активными ставками в этой лиге
+        console.log(`🔍 [Tier] Looking for Contenders opponents...`);
+        
+        const { data: contendersPlayers } = await supabase
+          .from('user_league_progress')
+          .select('user_id')
+          .eq('tournament_id', tournamentId)
+          .eq('tier_name', tier_name)
+          .neq('user_id', userId);
+        
+        const contenderIds = contendersPlayers?.map(r => r.user_id) || [];
+        console.log(`🔍 [Tier] Found ${contenderIds.length} players in Contenders:`, contenderIds);
+        
+        filteredRivals = rivals.filter(r => contenderIds.includes(r.user_id));
+        
+      } else {
+        // ДЛЯ PRO/ELITE/LEGEND: проверяем, что лига открыта (tier_levels_remaining = 0)
+        console.log(`🔍 [Tier] Looking for ${tier_name} opponents (tier_levels_remaining = 0)...`);
+        
+        const { data: eligibleRivals } = await supabase
+          .from('user_league_progress')
+          .select('user_id')
+          .eq('tournament_id', tournamentId)
+          .eq('tier_name', tier_name)
+          .eq('tier_levels_remaining', 0)
+          .neq('user_id', userId);
+        
+        const eligibleIds = eligibleRivals?.map(r => r.user_id) || [];
+        console.log(`🔍 [Tier] Found ${eligibleIds.length} players with ${tier_name} unlocked:`, eligibleIds);
+        
+        filteredRivals = rivals.filter(r => eligibleIds.includes(r.user_id));
+      }
       
       if (filteredRivals.length === 0) {
+        console.log(`❌ [Tier] No opponents found after filtering`);
         await supabase.from('users')
           .update({ coins: user.coins, tickets: user.tickets })
           .eq('id', userId);
         return res.status(400).json({ error: 'No opponents available in this tier' });
       }
+      console.log(`✅ [Tier] Found ${filteredRivals.length} opponents after filtering`);
     }
 
     const userDamage = userBet.total_damage;
@@ -1766,7 +1848,7 @@ if (isContenders) {
 }
 
        let bonusTickets = 0; 
-      let rankingPointsReward = 0;  // ← ДОБАВИТЬ ЭТУ СТРОКУ
+      let rankingPointsReward = 0;
        // Применяем модификаторы лиги к наградам
     
       if (tierConfig) {
@@ -2034,7 +2116,6 @@ app.post('/api/user/pvp-damage', authenticate, async (req, res) => {
       return res.status(400).json({ error: 'Invalid request' });
     }
     
-    // Загружаем способности пользователя
     const { data: userAbilitiesData } = await supabase
       .from('user_abilities')
       .select(`ability_id, current_level, abilities!inner (id, name, style, type, max_level)`)
@@ -2120,7 +2201,6 @@ app.get('/api/ranking-tiers/progress', authenticate, async (req, res) => {
       return res.status(400).json({ error: 'tournament_id is required' });
     }
     
-    // Фильтр по league (UFC, PFL...) если передан
     let configQuery = supabase.from('ranking_tiers_config').select('*').order('sort_order');
     if (league) {
       configQuery = configQuery.eq('league', league);
@@ -2138,7 +2218,6 @@ app.get('/api/ranking-tiers/progress', authenticate, async (req, res) => {
       .eq('user_id', userId)
       .eq('tournament_id', tournament_id);
     
-    // Если прогресса нет — создаём начальный для всех лиг
     if (!progress || progress.length === 0) {
       const initialProgress = configs.map(config => ({
         user_id: userId,
@@ -2241,7 +2320,6 @@ app.post('/api/fighters/calculate-details', authenticate, async (req, res) => {
       return res.status(400).json({ error: 'Invalid request' });
     }
     
-    // 1. Загружаем способности пользователя
     const { data: userAbilitiesData } = await supabase
       .from('user_abilities')
       .select(`ability_id, current_level, abilities!inner (id, name, style, type, max_level)`)
@@ -2263,7 +2341,6 @@ app.post('/api/fighters/calculate-details', authenticate, async (req, res) => {
       }));
     }
     
-    // 2. Загружаем полные данные бойцов
     const fighterNames = selections.map(s => s.fighter.Fighter);
     const { data: fightersData } = await supabase
       .from('fighters')
@@ -2271,14 +2348,12 @@ app.post('/api/fighters/calculate-details', authenticate, async (req, res) => {
       .eq('tournament_id', parseInt(tournamentId))
       .in('fighter_name', fighterNames);
     
-    // 3. Применяем пассивные способности к картам (для получения общего PvP урона)
     const { cards: enhancedCards, healthBonus } = applyPassiveAbilities(
       selections.map(sel => ({ ...sel, fighter: { ...sel.fighter } })),
       userAbilities,
       fightersData
     );
     
-    // 4. Собираем бонусы из способностей для детального расчёта PvP компонентов
     let skillBonuses = {
       STYLE_STRIKER: 0,
       STYLE_GRAPPLER: 0,
@@ -2301,7 +2376,6 @@ app.post('/api/fighters/calculate-details', authenticate, async (req, res) => {
       });
     }
     
-    // 5. Коэффициенты из БД
     const KD_COEF = getCoef('KD_COEF') || 25;
     const TD_COEF = getCoef('TD_COEF') || 10;
     const SUB_COEF = getCoef('SUB_COEF') || 15;
@@ -2309,7 +2383,6 @@ app.post('/api/fighters/calculate-details', authenticate, async (req, res) => {
     const BODY_COEF = getCoef('BODY_COEF') || 0.9;
     const LEG_COEF = getCoef('LEG_COEF') || 0.8;
     
-    // 6. Для каждого бойца собираем детальную информацию
     const fightersDetails = selections.map((selection, idx) => {
       const fighterData = fightersData?.find(f => f.fighter_name === selection.fighter.Fighter);
       const enhancedCard = enhancedCards[idx];
@@ -2334,7 +2407,6 @@ app.post('/api/fighters/calculate-details', authenticate, async (req, res) => {
         };
       }
       
-      // Рассчитываем базовые компоненты урона (без скиллов)
       const weightCoef = getWeightCoefficient(fighterData.weight_class);
       const wl = (fighterData.wl || 'lose').toLowerCase();
       let wkCoef = getCoef('LOSE_COEF') || 0.7;
@@ -2355,7 +2427,6 @@ app.post('/api/fighters/calculate-details', authenticate, async (req, res) => {
         else if (method.includes('SUB')) subBonus = getCoef('SUB_BONUS_WIN') || 35;
       }
       
-      // Базовые компоненты
       const baseComponents = {
         weightCoef: weightCoef,
         wkCoef: wkCoef,
@@ -2369,14 +2440,12 @@ app.post('/api/fighters/calculate-details', authenticate, async (req, res) => {
         legDamage: Math.round(leg * LEG_COEF * weightCoef * wkCoef)
       };
       
-      // Определяем стиль бойца
       const fighterStyle = getFighterStyle(
         safeNumber(selection.fighter.Str),
         safeNumber(selection.fighter.Td),
         safeNumber(selection.fighter.Sub)
       );
       
-      // Стилевой коэффициент для PvP
       let pvpStyleCoef = 1.0;
       if (fighterStyle === 'striker') {
         pvpStyleCoef = 1 + skillBonuses.STYLE_STRIKER / 100;
@@ -2386,10 +2455,8 @@ app.post('/api/fighters/calculate-details', authenticate, async (req, res) => {
         pvpStyleCoef = 1 + (skillBonuses.STYLE_STRIKER + skillBonuses.STYLE_GRAPPLER) / 100;
       }
       
-      // Head коэффициент с учётом бонуса
       const headCoefPvP = HEAD_COEF * (1 + skillBonuses.HEAD_COEF / 100);
       
-      // PvP компоненты
       const pvpComponents = {
         weightCoef: weightCoef,
         wkCoef: wkCoef,
@@ -2439,7 +2506,6 @@ app.post('/api/fighters/calculate-details', authenticate, async (req, res) => {
 
 // ---------- СПИСОК БОЙЦОВ UFC ----------
 
-// Получить всех бойцов (с пагинацией)
 app.get('/api/ufc-fighters/list', async (req, res) => {
   try {
     let allFighters = [];
@@ -2474,7 +2540,6 @@ app.get('/api/ufc-fighters/list', async (req, res) => {
   }
 });
 
-// Очистка таблицы бойцов (вызывается один раз перед загрузкой)
 app.post('/api/ufc-fighters/clear', async (req, res) => {
   try {
     const { error } = await supabase
@@ -2492,7 +2557,6 @@ app.post('/api/ufc-fighters/clear', async (req, res) => {
   }
 });
 
-// Получить количество бойцов
 app.get('/api/ufc-fighters/count', async (req, res) => {
   try {
     const { count, error } = await supabase
@@ -2509,13 +2573,11 @@ app.get('/api/ufc-fighters/count', async (req, res) => {
 
 // ========== МАГАЗИН ==========
 
-// Получить информацию о кардпаке для лиги
 app.get('/api/shop/card-pack/:league', authenticate, async (req, res) => {
   try {
     const { league } = req.params;
     const userId = req.user.userId;
     
-    // Получаем конфигурацию предмета
     const itemName = `${league.toUpperCase()} Card Pack`;
     const { data: packConfig, error: configError } = await supabase
       .from('payments_card_packs')
@@ -2527,7 +2589,6 @@ app.get('/api/shop/card-pack/:league', authenticate, async (req, res) => {
       return res.status(404).json({ error: 'Card pack not found' });
     }
     
-    // Получаем последний завершённый турнир для лиги
     const { data: tournament, error: tournamentError } = await supabase
       .from('tournaments')
       .select('id, name, date')
@@ -2541,7 +2602,6 @@ app.get('/api/shop/card-pack/:league', authenticate, async (req, res) => {
       return res.status(404).json({ error: 'No active tournament found for this league' });
     }
     
-    // Получаем историю покупок пользователя
     const { data: userPurchase, error: purchaseError } = await supabase
       .from('user_purchases')
       .select('*')
@@ -2549,7 +2609,6 @@ app.get('/api/shop/card-pack/:league', authenticate, async (req, res) => {
       .eq('item_name', itemName)
       .single();
     
-    // Рассчитываем текущую цену и перезарядку
     let currentPrice = packConfig.item_price;
     let reloadSecondsLeft = 0;
     let canPurchase = true;
@@ -2562,12 +2621,10 @@ app.get('/api/shop/card-pack/:league', authenticate, async (req, res) => {
       const timeSinceLastPurchase = now - lastPurchase;
       
       if (timeSinceLastPurchase < reloadMs) {
-        // Перезарядка активна — цена удваивается
         currentPrice = userPurchase.current_price * 2;
         reloadSecondsLeft = Math.ceil((reloadMs - timeSinceLastPurchase) / 1000);
-        canPurchase = true; // Можно купить, но дороже
+        canPurchase = true;
       } else {
-        // Перезарядка истекла — цена начальная
         currentPrice = packConfig.item_price;
       }
     }
@@ -2591,13 +2648,11 @@ app.get('/api/shop/card-pack/:league', authenticate, async (req, res) => {
   }
 });
 
-// Покупка кардпака
 app.post('/api/shop/purchase-card-pack', authenticate, async (req, res) => {
   try {
     const { league, itemName, price } = req.body;
     const userId = req.user.userId;
     
-    // 1. Проверяем баланс пользователя
     const { data: user, error: userError } = await supabase
       .from('users')
       .select('coins')
@@ -2609,7 +2664,6 @@ app.post('/api/shop/purchase-card-pack', authenticate, async (req, res) => {
       return res.status(400).json({ error: 'Not enough coins' });
     }
     
-    // 2. Получаем конфигурацию предмета
     const fullItemName = `${league.toUpperCase()} Card Pack`;
     const { data: packConfig, error: configError } = await supabase
       .from('payments_card_packs')
@@ -2621,7 +2675,6 @@ app.post('/api/shop/purchase-card-pack', authenticate, async (req, res) => {
       return res.status(404).json({ error: 'Card pack not found' });
     }
     
-    // 3. Получаем последний завершённый турнир для лиги
     const { data: tournament, error: tournamentError } = await supabase
       .from('tournaments')
       .select('id, name')
@@ -2635,7 +2688,6 @@ app.post('/api/shop/purchase-card-pack', authenticate, async (req, res) => {
       return res.status(404).json({ error: 'No active tournament found' });
     }
     
-    // 4. Получаем все весовые категории и бойцов турнира
     const { data: fighters, error: fightersError } = await supabase
       .from('fighters')
       .select('fighter_name, weight_class')
@@ -2643,7 +2695,6 @@ app.post('/api/shop/purchase-card-pack', authenticate, async (req, res) => {
     
     if (fightersError) throw fightersError;
     
-    // Группируем бойцов по весовым категориям
     const fightersByWeight = {};
     fighters.forEach(fighter => {
       if (!fightersByWeight[fighter.weight_class]) {
@@ -2657,7 +2708,6 @@ app.post('/api/shop/purchase-card-pack', authenticate, async (req, res) => {
       return res.status(400).json({ error: 'Not enough weight classes in tournament' });
     }
     
-    // 5. Выбираем 5 случайных весовых категорий
     const shuffledWeightClasses = [...weightClasses];
     for (let i = shuffledWeightClasses.length - 1; i > 0; i--) {
       const j = Math.floor(Math.random() * (i + 1));
@@ -2665,14 +2715,12 @@ app.post('/api/shop/purchase-card-pack', authenticate, async (req, res) => {
     }
     const selectedWeightClasses = shuffledWeightClasses.slice(0, 5);
     
-    // 6. Для каждой категории выбираем случайного бойца
     const selections = [];
     for (const weightClass of selectedWeightClasses) {
       const weightFighters = fightersByWeight[weightClass];
       const randomIndex = Math.floor(Math.random() * weightFighters.length);
       const selectedFighter = weightFighters[randomIndex];
       
-      // Получаем полные данные бойца
       const { data: fighterData, error: fighterDataError } = await supabase
         .from('fighters')
         .select('*')
@@ -2702,7 +2750,6 @@ app.post('/api/shop/purchase-card-pack', authenticate, async (req, res) => {
       });
     }
     
-    // 7. Обновляем или создаём ставку
     const { data: existingBet } = await supabase
       .from('bets')
       .select('id')
@@ -2714,18 +2761,16 @@ app.post('/api/shop/purchase-card-pack', authenticate, async (req, res) => {
     const totalDamage = selections.reduce((sum, sel) => sum + (sel.fighter['Total Damage'] || 0), 0);
     
     if (existingBet) {
-      // Обновляем существующую ставку
       await supabase
         .from('bets')
         .update({
           selections: selections,
           total_damage: totalDamage,
-          bet_amount: 0,  // Ставка не из монет, а из покупки
+          bet_amount: 0,
           updated_at: new Date()
         })
         .eq('id', existingBet.id);
     } else {
-      // Создаём новую ставку
       await supabase
         .from('bets')
         .insert({
@@ -2740,55 +2785,49 @@ app.post('/api/shop/purchase-card-pack', authenticate, async (req, res) => {
         });
     }
     
-    // 8. Списаем монеты
     await supabase
       .from('users')
       .update({ coins: user.coins - price })
       .eq('id', userId);
     
-    // 9. Обновляем историю покупок
     const now = new Date();
-const { data: existingPurchase } = await supabase
-  .from('user_purchases')
-  .select('*')
-  .eq('user_id', userId)
-  .eq('item_name', fullItemName)
-  .maybeSingle();
-
-// Проверяем, была ли покупка по начальной цене
-const isBasePrice = price === packConfig.item_price;
-
-if (existingPurchase) {
-  // Обновляем last_purchase_time ТОЛЬКО если покупка по начальной цене
-  const updateData = {
-    current_price: price,
-    purchase_count: existingPurchase.purchase_count + 1,
-    tournament_id: tournament.id
-  };
-  
-  if (isBasePrice) {
-    updateData.last_purchase_time = now;
-  }
-  
-  await supabase
-    .from('user_purchases')
-    .update(updateData)
-    .eq('id', existingPurchase.id);
-} else {
-  // Первая покупка всегда по начальной цене
-  await supabase
-    .from('user_purchases')
-    .insert({
-      user_id: userId,
-      item_name: fullItemName,
-      tournament_id: tournament.id,
-      last_purchase_time: now,
-      current_price: price,
-      purchase_count: 1
-    });
-}
+    const { data: existingPurchase } = await supabase
+      .from('user_purchases')
+      .select('*')
+      .eq('user_id', userId)
+      .eq('item_name', fullItemName)
+      .maybeSingle();
     
-    // 10. Возвращаем результат
+    const isBasePrice = price === packConfig.item_price;
+    
+    if (existingPurchase) {
+      const updateData = {
+        current_price: price,
+        purchase_count: existingPurchase.purchase_count + 1,
+        tournament_id: tournament.id
+      };
+      
+      if (isBasePrice) {
+        updateData.last_purchase_time = now;
+      }
+      
+      await supabase
+        .from('user_purchases')
+        .update(updateData)
+        .eq('id', existingPurchase.id);
+    } else {
+      await supabase
+        .from('user_purchases')
+        .insert({
+          user_id: userId,
+          item_name: fullItemName,
+          tournament_id: tournament.id,
+          last_purchase_time: now,
+          current_price: price,
+          purchase_count: 1
+        });
+    }
+    
     res.json({
       success: true,
       newCoins: user.coins - price,
@@ -2800,7 +2839,5 @@ if (existingPurchase) {
     res.status(500).json({ error: err.message });
   }
 });
-
-
 
 app.listen(port, () => console.log(`Server running on port ${port}`));
