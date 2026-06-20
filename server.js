@@ -3139,4 +3139,211 @@ app.get('/api/shop/packs', authenticate, async (req, res) => {
   }
 });
 
+// ========== МАГАЗИН - CURRENCY ==========
+
+// Получение всех currency предметов
+app.get('/api/shop/currency', authenticate, async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('payments_currency')
+      .select('*')
+      .order('id');
+    
+    if (error) throw error;
+    res.json(data);
+  } catch (err) {
+    console.error('❌ Error getting currency items:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Получение информации о конкретном currency предмете (с таймером)
+app.post('/api/shop/currency-info', authenticate, async (req, res) => {
+  try {
+    const { itemName } = req.body;
+    const userId = req.user.userId;
+    
+    console.log(`📊 Checking currency item info: ${itemName} for user ${userId}`);
+    
+    // 1. Проверяем конфигурацию
+    const { data: itemConfig, error: configError } = await supabase
+      .from('payments_currency')
+      .select('*')
+      .eq('item_name', itemName)
+      .single();
+    
+    if (configError || !itemConfig) {
+      console.error('❌ Currency item not found:', configError);
+      return res.status(404).json({ error: 'Currency item not found' });
+    }
+    
+    // 2. Проверяем, не на таймере ли пользователь
+    const { data: userPurchase, error: purchaseError } = await supabase
+      .from('user_purchases')
+      .select('*')
+      .eq('user_id', userId)
+      .eq('item_name', itemName)
+      .maybeSingle();
+    
+    let reloadSecondsLeft = 0;
+    
+    if (userPurchase) {
+      const lastPurchase = new Date(userPurchase.last_purchase_time);
+      const now = new Date();
+      const reloadMs = itemConfig.item_reload_time * 60 * 1000;
+      const timeSinceLastPurchase = now - lastPurchase;
+      
+      if (timeSinceLastPurchase < reloadMs) {
+        reloadSecondsLeft = Math.ceil((reloadMs - timeSinceLastPurchase) / 1000);
+        console.log(`⏳ Currency item on cooldown: ${reloadSecondsLeft}s remaining`);
+      } else {
+        console.log(`✅ Currency item available`);
+      }
+    } else {
+      console.log(`✅ Currency item available (never purchased)`);
+    }
+    
+    res.json({
+      itemName: itemConfig.item_name,
+      itemInfo: itemConfig.item_info,
+      itemCoinsPrice: itemConfig.item_coins_price,
+      itemFiatPrice: itemConfig.item_fiat_price,
+      reloadSecondsLeft: reloadSecondsLeft,
+      reloadTimeMinutes: itemConfig.item_reload_time,
+      canPurchase: reloadSecondsLeft === 0
+    });
+    
+  } catch (err) {
+    console.error('❌ Error getting currency item info:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Покупка currency предмета
+app.post('/api/shop/purchase-currency', authenticate, async (req, res) => {
+  try {
+    const { itemName, price } = req.body;
+    const userId = req.user.userId;
+    
+    console.log(`🪙 Purchasing currency item: ${itemName} for ${price} coins, user ${userId}`);
+    
+    // 1. Проверяем конфигурацию
+    const { data: itemConfig, error: configError } = await supabase
+      .from('payments_currency')
+      .select('*')
+      .eq('item_name', itemName)
+      .single();
+    
+    if (configError || !itemConfig) {
+      console.error('❌ Currency item not found:', configError);
+      return res.status(404).json({ error: 'Currency item not found' });
+    }
+    
+    // 2. Проверяем баланс пользователя
+    const { data: user, error: userError } = await supabase
+      .from('users')
+      .select('coins, tickets')
+      .eq('id', userId)
+      .single();
+    
+    if (userError) throw userError;
+    
+    if (user.coins < price) {
+      return res.status(400).json({ error: 'Not enough coins' });
+    }
+    
+    // 3. Проверяем таймер
+    const { data: userPurchase, error: purchaseError } = await supabase
+      .from('user_purchases')
+      .select('*')
+      .eq('user_id', userId)
+      .eq('item_name', itemName)
+      .maybeSingle();
+    
+    if (userPurchase) {
+      const lastPurchase = new Date(userPurchase.last_purchase_time);
+      const now = new Date();
+      const reloadMs = itemConfig.item_reload_time * 60 * 1000;
+      const timeSinceLastPurchase = now - lastPurchase;
+      
+      if (timeSinceLastPurchase < reloadMs) {
+        const reloadSecondsLeft = Math.ceil((reloadMs - timeSinceLastPurchase) / 1000);
+        return res.status(400).json({ 
+          error: 'Item is on cooldown',
+          reloadSecondsLeft 
+        });
+      }
+    }
+    
+    // 4. Определяем сколько билетов даём
+    let ticketsAmount = 0;
+    if (itemName === '5 Tickets') ticketsAmount = 5;
+    else if (itemName === '10 Tickets') ticketsAmount = 10;
+    else if (itemName === '25 Tickets') ticketsAmount = 25;
+    else if (itemName === '50 Tickets') ticketsAmount = 50;
+    else {
+      // Если название не совпадает, пытаемся извлечь число
+      const match = itemName.match(/(\d+)/);
+      if (match) ticketsAmount = parseInt(match[1]);
+      else ticketsAmount = 5; // fallback
+    }
+    
+    // 5. Списываем монеты, добавляем билеты
+    const newCoins = user.coins - price;
+    const newTickets = user.tickets + ticketsAmount;
+    
+    await supabase
+      .from('users')
+      .update({ coins: newCoins, tickets: newTickets })
+      .eq('id', userId);
+    
+    // 6. Обновляем запись о покупке
+    const now = new Date();
+    const { data: existingPurchase } = await supabase
+      .from('user_purchases')
+      .select('*')
+      .eq('user_id', userId)
+      .eq('item_name', itemName)
+      .maybeSingle();
+    
+    if (existingPurchase) {
+      await supabase
+        .from('user_purchases')
+        .update({
+          last_purchase_time: now,
+          current_price: price,
+          purchase_count: existingPurchase.purchase_count + 1
+        })
+        .eq('id', existingPurchase.id);
+      console.log(`✅ Updated purchase record, count: ${existingPurchase.purchase_count + 1}`);
+    } else {
+      await supabase
+        .from('user_purchases')
+        .insert({
+          user_id: userId,
+          item_name: itemName,
+          last_purchase_time: now,
+          current_price: price,
+          purchase_count: 1
+        });
+      console.log(`✅ Created purchase record`);
+    }
+    
+    const reloadSeconds = itemConfig.item_reload_time * 60;
+    
+    res.json({
+      success: true,
+      newCoins: newCoins,
+      newTickets: newTickets,
+      ticketsAmount: ticketsAmount,
+      reloadSecondsLeft: reloadSeconds,
+      itemName: itemName
+    });
+    
+  } catch (err) {
+    console.error('❌ Error purchasing currency item:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.listen(port, () => console.log(`Server running on port ${port}`));
