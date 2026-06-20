@@ -2840,4 +2840,303 @@ app.post('/api/shop/purchase-card-pack', authenticate, async (req, res) => {
   }
 });
 
+// ========== МАГАЗИН - ИНФОРМАЦИЯ О БЕСПЛАТНОМ ПАКЕ ==========
+
+app.post('/api/shop/free-pack-info', authenticate, async (req, res) => {
+  try {
+    const { league, itemName } = req.body;
+    const userId = req.user.userId;
+    
+    const fullItemName = `${league.toUpperCase()} Card Pack Free`;
+    console.log(`📊 Checking free pack info: ${fullItemName} for user ${userId}`);
+    
+    // 1. Проверяем конфигурацию бесплатного пака
+    const { data: packConfig, error: configError } = await supabase
+      .from('payments_card_packs')
+      .select('*')
+      .eq('item_name', fullItemName)
+      .eq('item_price', 0)
+      .single();
+    
+    if (configError || !packConfig) {
+      console.error('❌ Free pack not found in config:', configError);
+      return res.status(404).json({ error: 'Free card pack not found' });
+    }
+    
+    // 2. Проверяем, не на таймере ли пользователь
+    const { data: userPurchase, error: purchaseError } = await supabase
+      .from('user_purchases')
+      .select('*')
+      .eq('user_id', userId)
+      .eq('item_name', fullItemName)
+      .maybeSingle();
+    
+    let reloadSecondsLeft = 0;
+    
+    if (userPurchase) {
+      const lastPurchase = new Date(userPurchase.last_purchase_time);
+      const now = new Date();
+      const reloadMs = packConfig.item_reload_time * 60 * 1000;
+      const timeSinceLastPurchase = now - lastPurchase;
+      
+      if (timeSinceLastPurchase < reloadMs) {
+        reloadSecondsLeft = Math.ceil((reloadMs - timeSinceLastPurchase) / 1000);
+        console.log(`⏳ Free pack on cooldown: ${reloadSecondsLeft}s remaining`);
+      } else {
+        console.log(`✅ Free pack available`);
+      }
+    } else {
+      console.log(`✅ Free pack available (never claimed)`);
+    }
+    
+    res.json({
+      itemName: packConfig.item_name,
+      itemInfo: packConfig.item_info,
+      currentPrice: 0,
+      reloadSecondsLeft: reloadSecondsLeft,
+      reloadTimeMinutes: packConfig.item_reload_time,
+      canClaim: reloadSecondsLeft === 0
+    });
+    
+  } catch (err) {
+    console.error('❌ Error getting free pack info:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ========== МАГАЗИН - БЕСПЛАТНЫЙ ПАК ==========
+
+app.post('/api/shop/claim-free-card-pack', authenticate, async (req, res) => {
+  try {
+    const { league, itemName } = req.body;
+    const userId = req.user.userId;
+    
+    const fullItemName = `${league.toUpperCase()} Card Pack Free`;
+    console.log(`🎁 Claiming free pack: ${fullItemName} for user ${userId}`);
+    
+    // 1. Проверяем конфигурацию бесплатного пака
+    const { data: packConfig, error: configError } = await supabase
+      .from('payments_card_packs')
+      .select('*')
+      .eq('item_name', fullItemName)
+      .eq('item_price', 0)
+      .single();
+    
+    if (configError || !packConfig) {
+      console.error('❌ Free pack not found in config:', configError);
+      return res.status(404).json({ error: 'Free card pack not found' });
+    }
+    
+    // 2. Проверяем, не на таймере ли пользователь
+    const { data: userPurchase, error: purchaseError } = await supabase
+      .from('user_purchases')
+      .select('*')
+      .eq('user_id', userId)
+      .eq('item_name', fullItemName)
+      .maybeSingle();
+    
+    if (userPurchase) {
+      const lastPurchase = new Date(userPurchase.last_purchase_time);
+      const now = new Date();
+      const reloadMs = packConfig.item_reload_time * 60 * 1000;
+      const timeSinceLastPurchase = now - lastPurchase;
+      
+      if (timeSinceLastPurchase < reloadMs) {
+        const reloadSecondsLeft = Math.ceil((reloadMs - timeSinceLastPurchase) / 1000);
+        console.log(`⏳ Free pack on cooldown: ${reloadSecondsLeft}s remaining`);
+        return res.status(400).json({ 
+          error: 'Free pack is on cooldown',
+          reloadSecondsLeft 
+        });
+      }
+    }
+    
+    // 3. Получаем активный турнир
+    const { data: tournament, error: tournamentError } = await supabase
+      .from('tournaments')
+      .select('id, name')
+      .eq('league', league)
+      .eq('status', 'completed')
+      .order('date', { ascending: false })
+      .limit(1)
+      .single();
+    
+    if (tournamentError || !tournament) {
+      console.error('❌ No active tournament found:', tournamentError);
+      return res.status(404).json({ error: 'No active tournament found for this league' });
+    }
+    
+    console.log(`📋 Tournament found: ${tournament.name} (id: ${tournament.id})`);
+    
+    // 4. Получаем всех бойцов турнира
+    const { data: fighters, error: fightersError } = await supabase
+      .from('fighters')
+      .select('fighter_name, weight_class, *')
+      .eq('tournament_id', tournament.id);
+    
+    if (fightersError) {
+      console.error('❌ Error loading fighters:', fightersError);
+      throw fightersError;
+    }
+    
+    if (!fighters || fighters.length === 0) {
+      return res.status(404).json({ error: 'No fighters found for this tournament' });
+    }
+    
+    // 5. Группируем бойцов по весовым категориям
+    const fightersByWeight = {};
+    fighters.forEach(fighter => {
+      if (!fightersByWeight[fighter.weight_class]) {
+        fightersByWeight[fighter.weight_class] = [];
+      }
+      fightersByWeight[fighter.weight_class].push(fighter);
+    });
+    
+    const weightClasses = Object.keys(fightersByWeight);
+    if (weightClasses.length < 5) {
+      return res.status(400).json({ error: 'Not enough weight classes in tournament' });
+    }
+    
+    // 6. Выбираем 5 случайных весовых категорий
+    const shuffledWeightClasses = [...weightClasses];
+    for (let i = shuffledWeightClasses.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [shuffledWeightClasses[i], shuffledWeightClasses[j]] = [shuffledWeightClasses[j], shuffledWeightClasses[i]];
+    }
+    const selectedWeightClasses = shuffledWeightClasses.slice(0, 5);
+    
+    // 7. Выбираем по одному случайному бойцу из каждой категории
+    const selections = [];
+    for (const weightClass of selectedWeightClasses) {
+      const weightFighters = fightersByWeight[weightClass];
+      const randomIndex = Math.floor(Math.random() * weightFighters.length);
+      const selectedFighter = weightFighters[randomIndex];
+      
+      selections.push({
+        weightClass: weightClass,
+        fighter: {
+          Fighter: selectedFighter.fighter_name,
+          'W/L': selectedFighter.wl,
+          'Total Damage': selectedFighter.total_damage,
+          Str: selectedFighter.str,
+          Td: selectedFighter.td,
+          Sub: selectedFighter.sub,
+          Method: selectedFighter.method,
+          Round: selectedFighter.round,
+          Time: selectedFighter.time,
+          Head: selectedFighter.head,
+          Body: selectedFighter.body,
+          Leg: selectedFighter.leg,
+          Kd: selectedFighter.kd
+        }
+      });
+    }
+    
+    console.log(`🎴 Selected ${selections.length} fighters from ${selectedWeightClasses.length} weight classes`);
+    
+    // 8. Создаём или обновляем ставку (без списания монет)
+    const totalDamage = selections.reduce((sum, sel) => sum + (sel.fighter['Total Damage'] || 0), 0);
+    
+    const { data: existingBet } = await supabase
+      .from('bets')
+      .select('id')
+      .eq('user_id', userId)
+      .eq('tournament_id', tournament.id)
+      .eq('cancelled', false)
+      .maybeSingle();
+    
+    if (existingBet) {
+      await supabase
+        .from('bets')
+        .update({
+          selections: selections,
+          total_damage: totalDamage,
+          bet_amount: 0,
+          updated_at: new Date()
+        })
+        .eq('id', existingBet.id);
+      console.log(`✅ Updated existing bet ${existingBet.id}`);
+    } else {
+      await supabase
+        .from('bets')
+        .insert({
+          user_id: userId,
+          tournament_id: tournament.id,
+          bet_amount: 0,
+          total_damage: totalDamage,
+          selections: selections,
+          cancelled: false,
+          reward_accepted: false,
+          rewards_created: false
+        });
+      console.log(`✅ Created new bet for tournament ${tournament.id}`);
+    }
+    
+    // 9. Обновляем запись о получении бесплатного пака
+    const now = new Date();
+    const { data: existingPurchase } = await supabase
+      .from('user_purchases')
+      .select('*')
+      .eq('user_id', userId)
+      .eq('item_name', fullItemName)
+      .maybeSingle();
+    
+    if (existingPurchase) {
+      await supabase
+        .from('user_purchases')
+        .update({
+          last_purchase_time: now,
+          current_price: 0,
+          purchase_count: existingPurchase.purchase_count + 1,
+          tournament_id: tournament.id
+        })
+        .eq('id', existingPurchase.id);
+      console.log(`✅ Updated purchase record, count: ${existingPurchase.purchase_count + 1}`);
+    } else {
+      await supabase
+        .from('user_purchases')
+        .insert({
+          user_id: userId,
+          item_name: fullItemName,
+          tournament_id: tournament.id,
+          last_purchase_time: now,
+          current_price: 0,
+          purchase_count: 1
+        });
+      console.log(`✅ Created purchase record`);
+    }
+    
+    // 10. Возвращаем результат
+    const reloadSeconds = packConfig.item_reload_time * 60; // в секундах
+    
+    res.json({
+      success: true,
+      selections: selections,
+      tournamentName: tournament.name,
+      reloadSecondsLeft: reloadSeconds
+    });
+    
+  } catch (err) {
+    console.error('❌ Error claiming free card pack:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ========== МАГАЗИН - ВСЕ КОНФИГУРАЦИИ ПАКОВ ==========
+
+app.get('/api/shop/packs', authenticate, async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('payments_card_packs')
+      .select('*')
+      .order('id');
+    
+    if (error) throw error;
+    res.json(data);
+  } catch (err) {
+    console.error('❌ Error getting pack configs:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.listen(port, () => console.log(`Server running on port ${port}`));
