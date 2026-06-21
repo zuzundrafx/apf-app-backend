@@ -3158,6 +3158,7 @@ app.get('/api/shop/currency', authenticate, async (req, res) => {
 });
 
 // Получение информации о конкретном currency предмете (с таймером)
+
 app.post('/api/shop/currency-info', authenticate, async (req, res) => {
   try {
     const { itemName } = req.body;
@@ -3165,7 +3166,6 @@ app.post('/api/shop/currency-info', authenticate, async (req, res) => {
     
     console.log(`📊 Checking currency item info: ${itemName} for user ${userId}`);
     
-    // 1. Проверяем конфигурацию
     const { data: itemConfig, error: configError } = await supabase
       .from('payments_currency')
       .select('*')
@@ -3177,7 +3177,6 @@ app.post('/api/shop/currency-info', authenticate, async (req, res) => {
       return res.status(404).json({ error: 'Currency item not found' });
     }
     
-    // 2. Проверяем, не на таймере ли пользователь
     const { data: userPurchase, error: purchaseError } = await supabase
       .from('user_purchases')
       .select('*')
@@ -3186,6 +3185,7 @@ app.post('/api/shop/currency-info', authenticate, async (req, res) => {
       .maybeSingle();
     
     let reloadSecondsLeft = 0;
+    let currentPrice = itemConfig.item_coins_price;
     
     if (userPurchase) {
       const lastPurchase = new Date(userPurchase.last_purchase_time);
@@ -3194,20 +3194,24 @@ app.post('/api/shop/currency-info', authenticate, async (req, res) => {
       const timeSinceLastPurchase = now - lastPurchase;
       
       if (timeSinceLastPurchase < reloadMs) {
+        currentPrice = userPurchase.current_price * 2;
         reloadSecondsLeft = Math.ceil((reloadMs - timeSinceLastPurchase) / 1000);
-        console.log(`⏳ Currency item on cooldown: ${reloadSecondsLeft}s remaining`);
+        console.log(`⏳ Currency item on cooldown: ${reloadSecondsLeft}s remaining, price doubled to ${currentPrice}`);
       } else {
-        console.log(`✅ Currency item available`);
+        currentPrice = itemConfig.item_coins_price;
+        console.log(`✅ Currency item available, base price: ${currentPrice}`);
       }
     } else {
-      console.log(`✅ Currency item available (never purchased)`);
+      console.log(`✅ Currency item available (never purchased), base price: ${currentPrice}`);
     }
     
     res.json({
       itemName: itemConfig.item_name,
       itemInfo: itemConfig.item_info,
       itemCoinsPrice: itemConfig.item_coins_price,
+      currentPrice: currentPrice,
       itemFiatPrice: itemConfig.item_fiat_price,
+      ticketsAmount: itemConfig.tickets_amount,
       reloadSecondsLeft: reloadSecondsLeft,
       reloadTimeMinutes: itemConfig.item_reload_time,
       canPurchase: reloadSecondsLeft === 0
@@ -3227,7 +3231,6 @@ app.post('/api/shop/purchase-currency', authenticate, async (req, res) => {
     
     console.log(`🪙 Purchasing currency item: ${itemName} for ${price} coins, user ${userId}`);
     
-    // 1. Проверяем конфигурацию
     const { data: itemConfig, error: configError } = await supabase
       .from('payments_currency')
       .select('*')
@@ -3239,7 +3242,6 @@ app.post('/api/shop/purchase-currency', authenticate, async (req, res) => {
       return res.status(404).json({ error: 'Currency item not found' });
     }
     
-    // 2. Проверяем баланс пользователя
     const { data: user, error: userError } = await supabase
       .from('users')
       .select('coins, tickets')
@@ -3252,7 +3254,6 @@ app.post('/api/shop/purchase-currency', authenticate, async (req, res) => {
       return res.status(400).json({ error: 'Not enough coins' });
     }
     
-    // 3. Проверяем таймер
     const { data: userPurchase, error: purchaseError } = await supabase
       .from('user_purchases')
       .select('*')
@@ -3275,20 +3276,7 @@ app.post('/api/shop/purchase-currency', authenticate, async (req, res) => {
       }
     }
     
-    // 4. Определяем сколько билетов даём
-    let ticketsAmount = 0;
-    if (itemName === '5 Tickets') ticketsAmount = 5;
-    else if (itemName === '10 Tickets') ticketsAmount = 10;
-    else if (itemName === '25 Tickets') ticketsAmount = 25;
-    else if (itemName === '50 Tickets') ticketsAmount = 50;
-    else {
-      // Если название не совпадает, пытаемся извлечь число
-      const match = itemName.match(/(\d+)/);
-      if (match) ticketsAmount = parseInt(match[1]);
-      else ticketsAmount = 5; // fallback
-    }
-    
-    // 5. Списываем монеты, добавляем билеты
+    const ticketsAmount = itemConfig.tickets_amount || 5;
     const newCoins = user.coins - price;
     const newTickets = user.tickets + ticketsAmount;
     
@@ -3297,7 +3285,6 @@ app.post('/api/shop/purchase-currency', authenticate, async (req, res) => {
       .update({ coins: newCoins, tickets: newTickets })
       .eq('id', userId);
     
-    // 6. Обновляем запись о покупке
     const now = new Date();
     const { data: existingPurchase } = await supabase
       .from('user_purchases')
@@ -3306,14 +3293,24 @@ app.post('/api/shop/purchase-currency', authenticate, async (req, res) => {
       .eq('item_name', itemName)
       .maybeSingle();
     
+    const isBasePrice = price === itemConfig.item_coins_price;
+    
     if (existingPurchase) {
+      const updateData = {
+        current_price: price,
+        purchase_count: existingPurchase.purchase_count + 1
+      };
+      
+      if (isBasePrice) {
+        updateData.last_purchase_time = now;
+        console.log(`✅ Base price — resetting cooldown timer`);
+      } else {
+        console.log(`⚠️ Doubled price — NOT resetting cooldown timer`);
+      }
+      
       await supabase
         .from('user_purchases')
-        .update({
-          last_purchase_time: now,
-          current_price: price,
-          purchase_count: existingPurchase.purchase_count + 1
-        })
+        .update(updateData)
         .eq('id', existingPurchase.id);
       console.log(`✅ Updated purchase record, count: ${existingPurchase.purchase_count + 1}`);
     } else {
