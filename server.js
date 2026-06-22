@@ -3254,27 +3254,13 @@ app.post('/api/shop/purchase-currency', authenticate, async (req, res) => {
       return res.status(400).json({ error: 'Not enough coins' });
     }
     
+    // ❌ УБИРАЕМ ПРОВЕРКУ ТАЙМЕРА - ПОКУПКА ВСЕГДА РАЗРЕШЕНА
     const { data: userPurchase, error: purchaseError } = await supabase
       .from('user_purchases')
       .select('*')
       .eq('user_id', userId)
       .eq('item_name', itemName)
       .maybeSingle();
-    
-    if (userPurchase) {
-      const lastPurchase = new Date(userPurchase.last_purchase_time);
-      const now = new Date();
-      const reloadMs = itemConfig.item_reload_time * 60 * 1000;
-      const timeSinceLastPurchase = now - lastPurchase;
-      
-      if (timeSinceLastPurchase < reloadMs) {
-        const reloadSecondsLeft = Math.ceil((reloadMs - timeSinceLastPurchase) / 1000);
-        return res.status(400).json({ 
-          error: 'Item is on cooldown',
-          reloadSecondsLeft 
-        });
-      }
-    }
     
     const ticketsAmount = itemConfig.tickets_amount || 5;
     const newCoins = user.coins - price;
