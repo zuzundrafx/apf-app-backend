@@ -3113,7 +3113,8 @@ app.post('/api/shop/claim-free-card-pack', authenticate, async (req, res) => {
       success: true,
       selections: selections,
       tournamentName: tournament.name,
-      reloadSecondsLeft: reloadSeconds
+      reloadSecondsLeft: reloadSeconds,
+      newCoins: updatedUser?.coins || 0  // ← ДОБАВИТЬ
     });
     
   } catch (err) {
