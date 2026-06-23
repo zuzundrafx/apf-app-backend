@@ -100,6 +100,33 @@ function getWeightCoefficient(weightClass) {
   return getCoef(key) || 1.0;
 }
 
+// ========== FIGHT PASS - ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
+
+async function getUserExpMultiplier(userId) {
+  try {
+    const { data: activePass, error } = await supabase
+      .from('user_fight_pass')
+      .select('payments_fight_pass!inner (exp_multiplier)')
+      .eq('user_id', userId)
+      .eq('is_active', true)
+      .gt('expires_at', new Date().toISOString())
+      .maybeSingle();
+    
+    if (error) throw error;
+    
+    if (activePass) {
+      const multiplier = activePass.payments_fight_pass.exp_multiplier || 1.0;
+      console.log(`✅ User ${userId} has Fight Pass, EXP multiplier: ${multiplier}x`);
+      return multiplier;
+    }
+    
+    return 1.0;
+  } catch (err) {
+    console.error('❌ Error getting user exp multiplier:', err);
+    return 1.0;
+  }
+}
+
 const LEVEL_THRESHOLDS = [5, 10, 15, 20, 25, 30, 35, 40, 45, 0];
 
 function calculateLevel(totalExp) {
@@ -288,7 +315,6 @@ app.post('/api/bets', authenticate, async (req, res) => {
     // ===== АВТОМАТИЧЕСКОЕ СОЗДАНИЕ ЗАПИСЕЙ В ЛИГАХ =====
     console.log(`📊 [League] Creating league progress records for user ${userId}, tournament ${tournamentId}`);
     
-    // Получаем конфигурацию всех лиг для этого турнира
     const { data: tierConfigs, error: configError } = await supabase
       .from('ranking_tiers_config')
       .select('*')
@@ -329,7 +355,6 @@ app.post('/api/bets', authenticate, async (req, res) => {
         }
       }
     } else {
-      // Если нет конфигурации - создаём хотя бы Contenders
       console.log(`📊 [League] No tier configs found, creating default Contenders record`);
       
       const { data: existingContenders } = await supabase
@@ -927,11 +952,15 @@ if (newFighterNames.length > 0) {
           const exp = winners * 5;
           const tickets = winners;
 
+          // ===== FIGHT PASS: Умножаем опыт =====
+          const userExpMultiplier = await getUserExpMultiplier(bet.user_id);
+          const actualExp = Math.round(exp * userExpMultiplier);
+
           await supabase.from('notifications').insert({
             user_id: bet.user_id,
             type: 'tournament_reward',
             tournament_name: dbTournament.name,
-            data: { coins, tickets, experience: exp, winners: updatedSelections.filter(s => s.fighter['W/L'] === 'win'), allSelections: updatedSelections }
+            data: { coins, tickets, experience: actualExp, winners: updatedSelections.filter(s => s.fighter['W/L'] === 'win'), allSelections: updatedSelections }
           });
 
           await supabase.from('bets').update({
@@ -1588,8 +1617,8 @@ app.post('/api/pvp/start', authenticate, async (req, res) => {
       tierConfig = config;
       
       // Проверяем уровень игрока
-      if (user.level < tierConfig.min_player_level) {
-        return res.status(400).json({ error: `Player level too low. Required: ${tierConfig.min_player_level}` });
+      if (user.level < config.min_player_level) {
+        return res.status(400).json({ error: `Player level too low. Required: ${config.min_player_level}` });
       }
       
       // Проверяем, что лига открыта
@@ -1939,15 +1968,21 @@ console.log(`✅ [Tier] Updated ${tier_name}: ${currentProgress.tier_levels_rema
       
     }
 
+    // ===== FIGHT PASS: Получаем множители опыта =====
+    const winnerExpMultiplier = await getUserExpMultiplier(userId);
+    const loserExpMultiplier = await getUserExpMultiplier(bestRival.user_id);
+
     // Начисляем опыт и монеты
     const winnerId = result === 'win' ? userId : (result === 'loss' ? bestRival.user_id : null);
     let updatedWinner = null;
 
-    // Победитель получает монеты + опыт
+    // Победитель получает монеты + опыт (с умножением)
     if (winnerId) {
+      const actualWinnerExpReward = Math.round(expReward * winnerExpMultiplier);
+      
       const { data: winner } = await supabase
         .from('users').select('coins, tickets, experience, level, exp_points').eq('id', winnerId).single();
-      const newExp = winner.experience + expReward;
+      const newExp = winner.experience + actualWinnerExpReward;
       const newCoins = winner.coins + coinsReward;
       const newTickets = winner.tickets + (bonusTickets || 0);
       const { level, currentExp, nextLevelExp } = calculateLevel(newExp);
@@ -1961,12 +1996,14 @@ console.log(`✅ [Tier] Updated ${tier_name}: ${currentProgress.tier_levels_rema
       updatedWinner = { userId: winnerId, coins: newCoins, totalExp: newExp, level, currentExp, nextLevelExp, expPoints: newExpPoints };
     }
 
-    // Проигравший получает ТОЛЬКО опыт (без монет)
+    // Проигравший получает ТОЛЬКО опыт (с умножением)
     const loserId = result === 'win' ? bestRival.user_id : (result === 'loss' ? userId : null);
     if (loserId) {
+      const actualLoserExpReward = Math.round(expReward * loserExpMultiplier);
+      
       const { data: loser } = await supabase
         .from('users').select('experience, level, exp_points').eq('id', loserId).single();
-      const loserNewExp = loser.experience + expReward;
+      const loserNewExp = loser.experience + actualLoserExpReward;
       const { level: loserLevel } = calculateLevel(loserNewExp);
       let loserNewExpPoints = loser.exp_points;
       if (loserLevel > loser.level) loserNewExpPoints += (loserLevel - loser.level);
@@ -1976,11 +2013,14 @@ console.log(`✅ [Tier] Updated ${tier_name}: ${currentProgress.tier_levels_rema
         .eq('id', loserId);
     }
 
-    // При ничьей — оба получают опыт и возврат ставки
+    // При ничьей — оба получают опыт и возврат ставки (с умножением)
     if (result === 'draw') {
+      const actualUserExpReward = Math.round(expReward * winnerExpMultiplier);
+      const actualRivalExpReward = Math.round(expReward * loserExpMultiplier);
+      
       const { data: currentUser } = await supabase
         .from('users').select('coins, experience, level, exp_points').eq('id', userId).single();
-      const userNewExp = currentUser.experience + expReward;
+      const userNewExp = currentUser.experience + actualUserExpReward;
       const userNewCoins = currentUser.coins + coinsReward;
       const { level: userLevel } = calculateLevel(userNewExp);
       let userNewExpPoints = currentUser.exp_points;
@@ -1992,7 +2032,7 @@ console.log(`✅ [Tier] Updated ${tier_name}: ${currentProgress.tier_levels_rema
       
       const { data: rivalUser } = await supabase
         .from('users').select('coins, experience, level, exp_points').eq('id', bestRival.user_id).single();
-      const rivalNewExp = rivalUser.experience + expReward;
+      const rivalNewExp = rivalUser.experience + actualRivalExpReward;
       const rivalNewCoins = rivalUser.coins + coinsReward;
       const { level: rivalLevel } = calculateLevel(rivalNewExp);
       let rivalNewExpPoints = rivalUser.exp_points;
@@ -3125,7 +3165,7 @@ res.json({
   selections: selections,
   tournamentName: tournament.name,
   reloadSecondsLeft: reloadSeconds,
-  newCoins: updatedUser?.coins || 0  // ← ДОБАВЛЯЕМ
+  newCoins: updatedUser?.coins || 0
 });
     
   } catch (err) {
@@ -3342,6 +3382,275 @@ app.post('/api/shop/purchase-currency', authenticate, async (req, res) => {
     
   } catch (err) {
     console.error('❌ Error purchasing currency item:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ========== МАГАЗИН - FIGHT PASS ==========
+
+// Получение всех FIGHT PASS предметов
+app.get('/api/shop/fight-pass', authenticate, async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('payments_fight_pass')
+      .select('*')
+      .order('sort_order', { ascending: true })
+      .order('id', { ascending: true });
+    
+    if (error) throw error;
+    res.json(data);
+  } catch (err) {
+    console.error('❌ Error getting fight pass items:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Получение информации о FIGHT PASS предмете
+app.post('/api/shop/fight-pass-info', authenticate, async (req, res) => {
+  try {
+    const { itemName } = req.body;
+    const userId = req.user.userId;
+    
+    console.log(`📊 Checking fight pass item info: ${itemName} for user ${userId}`);
+    
+    const { data: itemConfig, error: configError } = await supabase
+      .from('payments_fight_pass')
+      .select('*')
+      .eq('item_name', itemName)
+      .single();
+    
+    if (configError || !itemConfig) {
+      console.error('❌ Fight pass item not found:', configError);
+      return res.status(404).json({ error: 'Fight pass item not found' });
+    }
+    
+    // Проверяем, есть ли у пользователя активная подписка
+    const { data: activePass, error: passError } = await supabase
+      .from('user_fight_pass')
+      .select('id, expires_at')
+      .eq('user_id', userId)
+      .eq('item_id', itemConfig.id)
+      .eq('is_active', true)
+      .gt('expires_at', new Date().toISOString())
+      .maybeSingle();
+    
+    const hasActivePass = !!activePass;
+    let timeLeftSeconds = 0;
+    
+    if (hasActivePass) {
+      const now = new Date();
+      const expiry = new Date(activePass.expires_at);
+      timeLeftSeconds = Math.max(0, Math.floor((expiry.getTime() - now.getTime()) / 1000));
+      console.log(`✅ User has active Fight Pass, expires in ${timeLeftSeconds}s`);
+    }
+    
+    // Проверяем cooldown
+    const { data: userPurchase, error: purchaseError } = await supabase
+      .from('user_purchases')
+      .select('*')
+      .eq('user_id', userId)
+      .eq('item_name', itemName)
+      .maybeSingle();
+    
+    let reloadSecondsLeft = 0;
+    let currentPrice = itemConfig.item_coins_price;
+    
+    if (userPurchase && !hasActivePass) {
+      const lastPurchase = new Date(userPurchase.last_purchase_time);
+      const now = new Date();
+      const reloadMs = itemConfig.item_reload_time * 60 * 1000;
+      const timeSinceLastPurchase = now - lastPurchase;
+      
+      if (timeSinceLastPurchase < reloadMs) {
+        currentPrice = userPurchase.current_price * 2;
+        reloadSecondsLeft = Math.ceil((reloadMs - timeSinceLastPurchase) / 1000);
+        console.log(`⏳ Fight pass on cooldown: ${reloadSecondsLeft}s`);
+      }
+    }
+    
+    res.json({
+      itemName: itemConfig.item_name,
+      itemInfo: itemConfig.item_info,
+      itemDescription: itemConfig.item_description,
+      itemCoinsPrice: itemConfig.item_coins_price,
+      currentPrice: currentPrice,
+      itemFiatPrice: itemConfig.item_fiat_price,
+      expMultiplier: itemConfig.exp_multiplier || 1.0,
+      durationDays: itemConfig.duration_days || 1,
+      reloadSecondsLeft: reloadSecondsLeft,
+      reloadTimeMinutes: itemConfig.item_reload_time,
+      hasActivePass: hasActivePass,
+      timeLeftSeconds: timeLeftSeconds,
+      canPurchase: reloadSecondsLeft === 0 && !hasActivePass
+    });
+    
+  } catch (err) {
+    console.error('❌ Error getting fight pass item info:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Покупка FIGHT PASS
+app.post('/api/shop/purchase-fight-pass', authenticate, async (req, res) => {
+  try {
+    const { itemName, price } = req.body;
+    const userId = req.user.userId;
+    
+    console.log(`🎖️ Purchasing fight pass: ${itemName} for ${price} coins, user ${userId}`);
+    
+    const { data: itemConfig, error: configError } = await supabase
+      .from('payments_fight_pass')
+      .select('*')
+      .eq('item_name', itemName)
+      .single();
+    
+    if (configError || !itemConfig) {
+      console.error('❌ Fight pass item not found:', configError);
+      return res.status(404).json({ error: 'Fight pass item not found' });
+    }
+    
+    // Проверяем активную подписку
+    const { data: activePass, error: passError } = await supabase
+      .from('user_fight_pass')
+      .select('id')
+      .eq('user_id', userId)
+      .eq('item_id', itemConfig.id)
+      .eq('is_active', true)
+      .gt('expires_at', new Date().toISOString())
+      .maybeSingle();
+    
+    if (activePass) {
+      return res.status(400).json({ error: 'You already have an active Fight Pass' });
+    }
+    
+    const { data: user, error: userError } = await supabase
+      .from('users')
+      .select('coins')
+      .eq('id', userId)
+      .single();
+    
+    if (userError) throw userError;
+    
+    if (price > 0 && user.coins < price) {
+      return res.status(400).json({ error: 'Not enough coins' });
+    }
+    
+    // Списываем монеты
+    const newCoins = user.coins - price;
+    await supabase
+      .from('users')
+      .update({ coins: newCoins })
+      .eq('id', userId);
+    
+    // Активируем подписку
+    const now = new Date();
+    const expiresAt = new Date(now);
+    expiresAt.setDate(expiresAt.getDate() + itemConfig.duration_days);
+    
+    await supabase
+      .from('user_fight_pass')
+      .insert({
+        user_id: userId,
+        item_id: itemConfig.id,
+        purchased_at: now.toISOString(),
+        expires_at: expiresAt.toISOString(),
+        is_active: true
+      });
+    
+    console.log(`✅ Fight Pass activated for user ${userId}, expires at ${expiresAt.toISOString()}`);
+    
+    // Обновляем запись о покупке
+    const { data: existingPurchase } = await supabase
+      .from('user_purchases')
+      .select('*')
+      .eq('user_id', userId)
+      .eq('item_name', itemName)
+      .maybeSingle();
+    
+    if (existingPurchase) {
+      await supabase
+        .from('user_purchases')
+        .update({
+          current_price: price,
+          purchase_count: existingPurchase.purchase_count + 1,
+          last_purchase_time: now.toISOString()
+        })
+        .eq('id', existingPurchase.id);
+    } else {
+      await supabase
+        .from('user_purchases')
+        .insert({
+          user_id: userId,
+          item_name: itemName,
+          last_purchase_time: now.toISOString(),
+          current_price: price,
+          purchase_count: 1
+        });
+    }
+    
+    res.json({
+      success: true,
+      newCoins: newCoins,
+      expiresAt: expiresAt.toISOString(),
+      durationDays: itemConfig.duration_days,
+      expMultiplier: itemConfig.exp_multiplier || 1.0,
+      itemName: itemName
+    });
+    
+  } catch (err) {
+    console.error('❌ Error purchasing fight pass:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Проверка статуса FIGHT PASS
+app.get('/api/user/fight-pass-status', authenticate, async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    
+    const { data: activePass, error: passError } = await supabase
+      .from('user_fight_pass')
+      .select(`
+        id,
+        purchased_at,
+        expires_at,
+        is_active,
+        payments_fight_pass!inner (
+          id,
+          item_name,
+          item_info,
+          exp_multiplier,
+          duration_days
+        )
+      `)
+      .eq('user_id', userId)
+      .eq('is_active', true)
+      .gt('expires_at', new Date().toISOString())
+      .maybeSingle();
+    
+    if (passError) throw passError;
+    
+    if (activePass) {
+      const now = new Date();
+      const expiry = new Date(activePass.expires_at);
+      const timeLeftSeconds = Math.max(0, Math.floor((expiry.getTime() - now.getTime()) / 1000));
+      
+      res.json({
+        hasActivePass: true,
+        itemName: activePass.payments_fight_pass.item_name,
+        expMultiplier: activePass.payments_fight_pass.exp_multiplier || 1.0,
+        expiresAt: activePass.expires_at,
+        timeLeftSeconds: timeLeftSeconds,
+        durationDays: activePass.payments_fight_pass.duration_days
+      });
+    } else {
+      res.json({
+        hasActivePass: false
+      });
+    }
+    
+  } catch (err) {
+    console.error('❌ Error checking fight pass status:', err);
     res.status(500).json({ error: err.message });
   }
 });
