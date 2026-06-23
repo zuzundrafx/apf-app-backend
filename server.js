@@ -3107,15 +3107,26 @@ app.post('/api/shop/claim-free-card-pack', authenticate, async (req, res) => {
     }
     
     // 10. Возвращаем результат
-    const reloadSeconds = packConfig.item_reload_time * 60; // в секундах
-    
-    res.json({
-      success: true,
-      selections: selections,
-      tournamentName: tournament.name,
-      reloadSecondsLeft: reloadSeconds,
-      newCoins: updatedUser?.coins || 0  // ← ДОБАВИТЬ
-    });
+    const { data: updatedUser, error: userError } = await supabase
+  .from('users')
+  .select('coins')
+  .eq('id', userId)
+  .single();
+
+if (userError) {
+  console.error('❌ Error fetching updated user:', userError);
+}
+
+// 11. Возвращаем результат
+const reloadSeconds = packConfig.item_reload_time * 60; // в секундах
+
+res.json({
+  success: true,
+  selections: selections,
+  tournamentName: tournament.name,
+  reloadSecondsLeft: reloadSeconds,
+  newCoins: updatedUser?.coins || 0  // ← ДОБАВЛЯЕМ
+});
     
   } catch (err) {
     console.error('❌ Error claiming free card pack:', err);
