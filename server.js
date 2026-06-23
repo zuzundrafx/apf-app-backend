@@ -3224,6 +3224,7 @@ app.post('/api/shop/currency-info', authenticate, async (req, res) => {
       currentPrice: currentPrice,
       itemFiatPrice: itemConfig.item_fiat_price,
       ticketsAmount: itemConfig.tickets_amount,
+      coinsAmount: itemConfig.coins_amount,
       reloadSecondsLeft: reloadSecondsLeft,
       reloadTimeMinutes: itemConfig.item_reload_time,
       canPurchase: reloadSecondsLeft === 0
@@ -3274,8 +3275,11 @@ app.post('/api/shop/purchase-currency', authenticate, async (req, res) => {
       .eq('item_name', itemName)
       .maybeSingle();
     
-    const ticketsAmount = itemConfig.tickets_amount || 5;
-    const newCoins = user.coins - price;
+    const ticketsAmount = itemConfig.tickets_amount || 0;
+    const coinsAmount = itemConfig.coins_amount || 0;
+    
+    // Списываем монеты, добавляем билеты и монеты
+    const newCoins = user.coins - price + coinsAmount;
     const newTickets = user.tickets + ticketsAmount;
     
     await supabase
@@ -3299,9 +3303,9 @@ app.post('/api/shop/purchase-currency', authenticate, async (req, res) => {
         purchase_count: existingPurchase.purchase_count + 1
       };
       
-      if (isBasePrice) {
+      if (isBasePrice || price === 0) {
         updateData.last_purchase_time = now;
-        console.log(`✅ Base price — resetting cooldown timer`);
+        console.log(`✅ ${price === 0 ? 'Free' : 'Base'} price — resetting cooldown timer`);
       } else {
         console.log(`⚠️ Doubled price — NOT resetting cooldown timer`);
       }
@@ -3331,6 +3335,7 @@ app.post('/api/shop/purchase-currency', authenticate, async (req, res) => {
       newCoins: newCoins,
       newTickets: newTickets,
       ticketsAmount: ticketsAmount,
+      coinsAmount: coinsAmount,
       reloadSecondsLeft: reloadSeconds,
       itemName: itemName
     });
