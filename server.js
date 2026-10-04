@@ -1753,16 +1753,22 @@ if (isContenders) {
         
         filteredRivals = rivals.filter(r => contenderIds.includes(r.user_id));
         
-      } else {
-        // ДЛЯ PRO/ELITE/LEGEND: проверяем, что лига открыта (tier_levels_remaining = 0)
-        console.log(`🔍 [Tier] Looking for ${tier_name} opponents (tier_levels_remaining = 0)...`);
+            } else {
+        // ДЛЯ PRO/ELITE/LEGEND: ищем тех, у кого разблокирована ТЕКУЩАЯ лига,
+        // то есть ПРЕДЫДУЩАЯ лига пройдена (tier_levels_remaining = 0)
+        const tierOrder = ['ufc_contenders', 'ufc_pro', 'ufc_elite', 'ufc_legend'];
+        const currentIdx = tierOrder.indexOf(tier_name);
+        const prevTierName = tierOrder[currentIdx - 1];
+        
+        console.log(`🔍 [Tier] Looking for ${tier_name} opponents...`);
+        console.log(`🔍 [Tier] Required: ${prevTierName} must have tier_levels_remaining = 0`);
         
         const { data: eligibleRivals } = await supabase
           .from('user_league_progress')
           .select('user_id')
           .eq('tournament_id', tournamentId)
-          .eq('tier_name', tier_name)
-          .eq('tier_levels_remaining', 0)
+          .eq('tier_name', prevTierName)         // ← ПРЕДЫДУЩАЯ лига!
+          .eq('tier_levels_remaining', 0)        // ← пройдена
           .neq('user_id', userId);
         
         const eligibleIds = eligibleRivals?.map(r => r.user_id) || [];
